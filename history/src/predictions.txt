@@ -1,0 +1,28 @@
+**Cluster Analysis Summary**
+
+1. **Top 3 Cross-Cluster Patterns:**
+	* Presence of schools and drinking water amenities in clusters 0 and 1 may indicate higher crime rates due to increased human activity.
+	* Clusters with multiple food and beverage options (clusters 5, 6) tend to have lower crime rates, potentially indicating a safer environment for community gatherings.
+	* Police presence seems to be a common factor in reducing crime rates (clusters 13 and 1).
+
+2. **Highest-Risk Amenity Types:**
+	* Fast food and drinking water amenities seem to be associated with higher crime rates.
+
+3. **City-Wide Policy Recommendation:**
+	* Implement a comprehensive urban planning strategy that incorporates CPTED principles, focusing on creating safer public spaces through improved lighting, surveillance, and community engagement.
+
+**Future Crime Predictions and Relevant Issues:**
+
+Based on the analysis, it is predicted that:
+
+1. Clusters with high foot traffic (e.g., near schools or food establishments) will continue to experience higher crime rates.
+2. Areas with poor lighting or inadequate surveillance may be more prone to criminal activity.
+3. The presence of police stations can help reduce crime rates in surrounding areas.
+
+To address these concerns, the city should:
+
+1. Prioritize urban planning initiatives that incorporate CPTED principles and prioritize lighting, surveillance, and community engagement.
+2. Implement data-driven policing strategies to target high-crime areas.
+3. Develop community programs and initiatives to promote community engagement and reduce criminal opportunities.
+
+By addressing these factors, the city can work towards creating safer public spaces and reducing crime rates in the long term.
