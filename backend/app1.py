@@ -36,11 +36,16 @@ def get_crime_heatmap():
     if df is None or df.empty:
         return []
     sample_size = min(5000, len(df))
-    heatmap_data = df.sample(sample_size)[['latitude', 'longitude', 'crime_type']]
-    crime_severity = cached_data.get('crime_severity', {})
-    heatmap_data['weight'] = heatmap_data['crime_type'].map(
-        lambda x: crime_severity.get(x, 3) / 10
-    )
+    heatmap_data = df.sample(sample_size)[['latitude', 'longitude', 'crime_type']].copy()
+
+    # Use severity_weight column if available, otherwise fall back to cached severity dict
+    if 'severity_weight' in df.columns:
+        heatmap_data['weight'] = df.sample(sample_size)['severity_weight']
+    else:
+        crime_severity = cached_data.get('crime_severity', {})
+        heatmap_data['weight'] = heatmap_data['crime_type'].map(
+            lambda x: crime_severity.get(x, 3) / 10
+        )
     return heatmap_data[['latitude', 'longitude', 'weight']].to_dict('records')
 
 
@@ -97,12 +102,12 @@ def get_dbscan_clusters_data():
         return []
     return [
         {
-            "id": cluster['cluster_id'],
+            "id": cluster_id,  # cluster_id is the dict key, not a field
             "lat": cluster['center_lat'],
             "lon": cluster['center_lon'],
             "crime_count": cluster['crime_count']
         }
-        for cluster in dbscan_data['dominant_crimes'].values()
+        for cluster_id, cluster in dbscan_data['dominant_crimes'].items()
     ]
 
 

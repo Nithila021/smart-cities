@@ -2,9 +2,10 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-import re
-from datetime import datetime
 import os
+
+# Import the data cleaner module
+from data_cleaner import DataCleaner, load_and_clean_csv, SEVERITY_WEIGHTS
 
 # Global cached data
 cached_data = {
@@ -17,118 +18,46 @@ cached_data = {
     'dbscan_clusters': None,
     'victim_demographic_zones': None,
     'demographic_feature_importance': None,
-    'crime_density_zones': None
+    'crime_density_zones': None,
+    'cleaning_report': None  # Store the cleaning report
 }
 
 
 def prepare_data():
-    """Load and preprocess raw NYPD crime data with enhanced cleaning.
+    """Load and preprocess raw NYPD crime data using the data_cleaner module.
 
     This function is responsible only for I/O and cleaning and returns a
     cleaned DataFrame. Model training and caching are handled separately
     in train_models().
+
+    Uses data_cleaner.py for all cleaning operations to ensure consistency
+    between CSV loading and database migration.
     """
-    # Load data with optimized dtypes
-    try:
-        dtypes = {
-            'cmplnt_num': 'string',
-            'rpt_dt': 'string',
-            'pd_desc': 'category',
-            'ofns_desc': 'category',
-            'boro_nm': 'category',
-            'prem_typ_desc': 'category'
-        }
-        df = pd.read_csv(
-            'NYPD_Complaint_Data_YTD.csv',
-            dtype=dtypes,
-            parse_dates=['cmplnt_fr_dt', 'cmplnt_to_dt']
-        )
-    except FileNotFoundError:
-        try:
-            # Try alternate filename
-            df = pd.read_csv(
-                'NYPD_Complaint_Data_Historic.csv',
-                dtype=dtypes,
-                parse_dates=['cmplnt_fr_dt', 'cmplnt_to_dt']
-            )
-        except FileNotFoundError:
-            raise RuntimeError("Data file not found. Ensure NYPD crime data CSV exists")
-
-    # Clean coordinates
-    def validate_nyc_coords(lat, lon):
-        return (40.4 <= lat <= 41.0) and (-74.3 <= lon <= -73.7)
-
-    coord_cols = ['lat_lon.latitude', 'lat_lon.longitude', 'latitude', 'longitude']
-    for col in coord_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    # Use either lat_lon.latitude/longitude or latitude/longitude columns
-    if 'lat_lon.latitude' in df.columns and 'lat_lon.longitude' in df.columns:
-        df['clean_lat'] = df['lat_lon.latitude']
-        df['clean_lon'] = df['lat_lon.longitude']
-    else:
-        df['clean_lat'] = df['latitude']
-        df['clean_lon'] = df['longitude']
-
-    valid_coords = df.apply(lambda x: validate_nyc_coords(x.clean_lat, x.clean_lon), axis=1)
-    df = df[valid_coords].copy()
-
-    # Clean victim demographics
-    victim_cols = ['vic_age_group', 'vic_race', 'vic_sex']
-    demographic_clean = {
-        'vic_age_group': lambda x: re.sub(r'\D+', '-', str(x)).upper() if pd.notna(x) else np.nan,
-        'vic_race': lambda x: 'UNKNOWN' if 'UNKNOWN' in str(x).upper() else str(x).upper(),
-        'vic_sex': lambda x: x[0].upper() if pd.notna(x) else np.nan
-    }
-
-    for col, fn in demographic_clean.items():
-        if col in df.columns:
-            df[col] = df[col].apply(fn).str.strip().replace('', np.nan)
-
-    # Clean crime types
-    crime_field = 'ofns_desc' if 'ofns_desc' in df.columns else 'offense_description'
-    crime_mappings = {
-        r'ASSAULT.*3.*': 'ASSAULT_3',
-        r'HARRASSMENT': 'HARASSMENT',
-        r'DRIVING WHILE INTOXICATED': 'DWI',
-        r'CRIMINAL MISCHIEF.*': 'CRIMINAL_MISCHIEF'
-    }
-
-    df['crime_type'] = df[crime_field].str.upper().str.strip()
-    for pattern, replacement in crime_mappings.items():
-        df['crime_type'] = df['crime_type'].str.replace(pattern, replacement, regex=True)
-
-    # Temporal features
-    date_col = 'cmplnt_fr_dt'
-    time_col = 'cmplnt_fr_tm'
-
-    def parse_dt(date_str, time_str):
-        try:
-            return datetime.strptime(f"{str(date_str)[:10]} {str(time_str)}", "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return pd.NaT
-
-    if date_col in df.columns and time_col in df.columns:
-        df['cmplnt_fr_datetime'] = df.apply(
-            lambda x: parse_dt(x[date_col], x[time_col]), axis=1
-        )
-
-    # Final cleaning
-    keep_cols = [
-        'clean_lat', 'clean_lon', 'crime_type',
-        'cmplnt_fr_datetime' if 'cmplnt_fr_datetime' in df.columns else date_col
+    # Find available data file
+    csv_files = [
+        'NYPD_Complaint_Data_YTD.csv',
+        'NYPD_Complaint_Data_Historic.csv',
+        '../NYPD_Complaint_Data_YTD.csv',
+        '../NYPD_Complaint_Data_Historic.csv',
     ]
 
-    # Add demographic columns if available
-    for col in victim_cols + ['boro_nm']:
-        if col in df.columns:
-            keep_cols.append(col)
+    csv_path = None
+    for f in csv_files:
+        if os.path.exists(f):
+            csv_path = f
+            break
 
-    df = df[keep_cols].rename(columns={
-        'clean_lat': 'latitude',
-        'clean_lon': 'longitude'
-    }).dropna(subset=['latitude', 'longitude', 'crime_type'])
+    if csv_path is None:
+        raise RuntimeError(
+            "Data file not found. Ensure NYPD crime data CSV exists in project root. "
+            f"Tried: {csv_files}"
+        )
+
+    # Use the centralized data cleaner
+    df, report = load_and_clean_csv(csv_path, verbose=True)
+
+    # Store cleaning report for debugging/auditing
+    cached_data['cleaning_report'] = report
 
     return df
 
@@ -148,12 +77,9 @@ def train_models(df):
     crime_kmeans = KMeans(n_clusters=30, random_state=42, n_init=10)
     df['crime_zone'] = crime_kmeans.fit_predict(coords_scaled)
 
-    # Create safety scores
-    crime_severity = {
-        'ASSAULT_3': 7, 'HARASSMENT': 4, 'DWI': 6, 'CRIMINAL_MISCHIEF': 3,
-        'ROBBERY': 8, 'GRAND LARCENY': 5, 'BURGLARY': 6, 'RAPE': 9,
-        'MURDER & NON-NEGL. MANSLAUGHTER': 10, 'FELONY ASSAULT': 8
-    }
+    # Create safety scores using SEVERITY_WEIGHTS from data_cleaner (0-1 scale)
+    # Convert to 1-10 scale for backward compatibility with existing formula
+    crime_severity = {k: int(v * 10) for k, v in SEVERITY_WEIGHTS.items()}
 
     zone_safety = {}
     zone_dominant_crimes = {}

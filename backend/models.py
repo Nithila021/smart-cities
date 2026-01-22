@@ -13,6 +13,25 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from data_init import cached_data
 from geo_utils import haversine
+from data_cleaner import CITY_BOUNDS_CONFIG
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+# Get default city bounds (NYC for now, can be configured via ACTIVE_CITY env var)
+_active_city = os.getenv('ACTIVE_CITY', 'nyc')
+_bounds = CITY_BOUNDS_CONFIG.get(_active_city, CITY_BOUNDS_CONFIG['nyc'])
+
+DEFAULT_LAT_MIN = _bounds['lat_min']
+DEFAULT_LAT_MAX = _bounds['lat_max']
+DEFAULT_LON_MIN = _bounds['lon_min']
+DEFAULT_LON_MAX = _bounds['lon_max']
+
+# NYC approximate area in square kilometers
+NYC_AREA_SQKM = 783.8
+
+# Grid resolution for density calculations
+DENSITY_GRID_SIZE = 50
 
 def initialize_dbscan_clusters(df):
     """
@@ -26,10 +45,10 @@ def initialize_dbscan_clusters(df):
     df_sample = df.sample(sample_size, random_state=42) if len(df) > sample_size else df.copy()
     
     # Split into geographical batches for processing
-    # NYC approximate bounds
-    lat_min, lat_max = 40.4, 41.0
-    lon_min, lon_max = -74.3, -73.7
-    
+    # Use configured city bounds
+    lat_min, lat_max = DEFAULT_LAT_MIN, DEFAULT_LAT_MAX
+    lon_min, lon_max = DEFAULT_LON_MIN, DEFAULT_LON_MAX
+
     # Create 4 geographical quadrants
     print("Splitting data into geographical quadrants...")
     lat_mid = (lat_min + lat_max) / 2
@@ -301,32 +320,28 @@ def initialize_crime_density_zones(df):
     kde = KernelDensity(bandwidth=0.01, metric='haversine')
     kde.fit(coords)
     
-    # Create a grid over NYC for density visualization
-    # NYC approximate bounds
-    lat_min, lat_max = 40.4, 41.0
-    lon_min, lon_max = -74.3, -73.7
-    
+    # Create a grid for density visualization using configured bounds
+    lat_min, lat_max = DEFAULT_LAT_MIN, DEFAULT_LAT_MAX
+    lon_min, lon_max = DEFAULT_LON_MIN, DEFAULT_LON_MAX
+
     # Create grid (reduce resolution to manage memory)
-    grid_size = 50
-    lat_grid = np.linspace(lat_min, lat_max, grid_size)
-    lon_grid = np.linspace(lon_min, lon_max, grid_size)
+    lat_grid = np.linspace(lat_min, lat_max, DENSITY_GRID_SIZE)
+    lon_grid = np.linspace(lon_min, lon_max, DENSITY_GRID_SIZE)
     lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
-    
+
     # Flatten grid for KDE scoring
     grid_points = np.vstack([lat_mesh.ravel(), lon_mesh.ravel()]).T
-    
+
     # Score grid points
     log_density = kde.score_samples(grid_points)
     density = np.exp(log_density)
-    
+
     # Convert to crimes per square km
-    # Approximate conversion factor from density scores
     total_crimes = len(df_sample)
-    nyc_area_sqkm = 783.8  # NYC approx area in sq km
-    avg_density = total_crimes / nyc_area_sqkm
-    
+    avg_density = total_crimes / NYC_AREA_SQKM
+
     # Adjust density to crimes per sq km
-    crime_density = density * (total_crimes / density.sum()) * (grid_size**2 / nyc_area_sqkm)
+    crime_density = density * (total_crimes / density.sum()) * (DENSITY_GRID_SIZE**2 / NYC_AREA_SQKM)
     
     # Reshape for grid
     density_grid = crime_density.reshape(lat_mesh.shape)
@@ -379,9 +394,8 @@ def get_crime_density_classification(lat, lon):
     # Convert to crimes per sq km
     df = cached_data['df']
     total_crimes = len(df)
-    nyc_area_sqkm = 783.8
     grid_size = len(density_data['grid']['lat_grid'])
-    crime_density = density * (total_crimes / density) * (grid_size**2 / nyc_area_sqkm)
+    crime_density = density * (total_crimes / density) * (grid_size**2 / NYC_AREA_SQKM)
     
     # Classification logic
     thresholds = density_data['thresholds']
