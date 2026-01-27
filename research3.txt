@@ -3,6 +3,235 @@ RESEARCH 3: UNIFIED SYSTEM DESIGN & IMPLEMENTATION PLAN
 Combining Augment Analysis + ChatGPT Architecture Recommendations
 ================================================================================
 
+################################################################################
+#                           CHANGELOG / UPDATES                                 #
+#  New decisions go here. Old content preserved below for reference.           #
+################################################################################
+
+================================================================================
+UPDATE 2026-01-26: DATABASE SCHEMA DECISIONS (Nithila + Augment)
+================================================================================
+
+STATUS: DECIDED - Ready for implementation
+
+## SUMMARY OF KEY DECISIONS:
+
+| Decision                     | Choice                          | Rationale                    |
+|------------------------------|--------------------------------|------------------------------|
+| Amenities cache strategy     | Append + refresh on stale      | Avoid stale data, track provenance |
+| Risk cache demographic       | Separate rows per demographic  | Clean queries, indexable     |
+| Grid system                  | Simple grid for MVP, H3 later  | Faster to implement now      |
+| Cache invalidation           | Hybrid (time + event-based)    | Balance freshness vs compute |
+| Store crime counts           | Yes, raw + weighted            | Enables confidence + debug   |
+
+--------------------------------------------------------------------------------
+TABLE 1: AMENITIES (Smart POI Cache)
+--------------------------------------------------------------------------------
+
+PURPOSE: Dynamic cache for geocoded locations. NOT a manually curated list.
+
+WORKFLOW:
+  1. User provides: address, place name, or coordinates
+  2. System checks amenities table (cache hit?)
+  3. Cache MISS → Query external API → Insert → Return
+  4. Cache HIT + fresh (<30 days) → Return cached
+  5. Cache HIT + stale (>30 days) → Return cached, queue background refresh
+
+SCHEMA:
+```sql
+CREATE TABLE amenities (
+    id SERIAL PRIMARY KEY,
+
+    -- Core identity
+    name VARCHAR(255) NOT NULL,
+    location GEOGRAPHY(POINT, 4326) NOT NULL,
+
+    -- Classification
+    amenity_type VARCHAR(50) NOT NULL,     -- Primary: bar, restaurant, park, transit
+    amenity_tags JSONB,                     -- Additional: ["nightclub", "live_music"]
+
+    -- External API linkage
+    external_id VARCHAR(100),               -- place_id (Google) or osm_id (Overpass)
+    external_api_source VARCHAR(30),        -- 'google_places', 'overpass', 'nominatim'
+
+    -- Operational data
+    operating_hours JSONB,                  -- {"mon": "09:00-22:00", ...}
+    neighborhood VARCHAR(100),
+
+    -- Cache management
+    created_at TIMESTAMP DEFAULT NOW(),
+    last_verified_at TIMESTAMP DEFAULT NOW(),
+    verification_count INTEGER DEFAULT 1,   -- How many times queried
+
+    -- Risk modifiers (ML can populate this)
+    risk_modifier DECIMAL(3,2) DEFAULT 1.0  -- 1.2 = increases risk, 0.8 = decreases
+);
+
+-- Indexes
+CREATE INDEX idx_amenity_location ON amenities USING GIST(location);
+CREATE INDEX idx_amenity_type ON amenities(amenity_type);
+CREATE INDEX idx_amenity_external ON amenities(external_api_source, external_id);
+```
+
+--------------------------------------------------------------------------------
+TABLE 2: RISK_CACHE (Demographic-Specific ML-Computed Risk Scores)
+--------------------------------------------------------------------------------
+
+PURPOSE: Pre-computed risk scores PER DEMOGRAPHIC GROUP based on ACTUAL
+         victimization data for that demographic in that location.
+
+CORE INNOVATION (PATENT-WORTHY):
+  - For demographic_group = "women" → count crimes WHERE victim_sex = 'F'
+  - For demographic_group = "children" → count crimes WHERE victim_age < 18
+  - For demographic_group = "elderly" → count crimes WHERE victim_age >= 65
+  - For demographic_group = "general" → count ALL crimes (baseline)
+
+RISK CALCULATION FORMULA:
+```
+risk_score(location, time, demographic) =
+    COUNT(crimes WHERE victim matches demographic
+          AND location IN grid_cell
+          AND time matches hour_bucket/day_type)
+    × time_decay_weight (recent = 1.0, 30-90 days = 0.7, 90+ days = 0.4)
+    × ML_adjustments (K-Means zone, DBSCAN hotspot, KDE density)
+```
+
+WHY SEPARATE ROWS PER DEMOGRAPHIC (not JSONB):
+  - Clean queries: WHERE demographic_group = 'women'
+  - Indexable: Can index on demographic_group column
+  - Explicit: No parsing JSONB
+  - Trade-off: 4x storage (acceptable)
+
+GRID SYSTEM DECISION:
+  - MVP: Simple grid using ROUND(lat, 3), ROUND(lon, 3) → ~111m cells
+  - Future: H3 hexagons resolution 9 (~174m) when scaling
+  - grid_cell_id format: "40.758_-73.985"
+
+CACHE INVALIDATION:
+  - Hybrid: time-based (expires_at) + event-based (is_stale flag)
+  - Daily job marks cells as stale if new crimes added
+  - Background job recomputes stale cells
+
+SCHEMA:
+```sql
+CREATE TABLE risk_cache (
+    id SERIAL PRIMARY KEY,
+
+    -- Location identifiers
+    grid_cell_id VARCHAR(20) NOT NULL,      -- "40.758_-73.985" or H3 index
+    center_point GEOGRAPHY(POINT, 4326),
+
+    -- Clustering context (from existing ML models)
+    zone_id INTEGER,                         -- K-Means zone (0-29)
+    dbscan_cluster_id INTEGER,               -- NULL if not in hotspot
+    density_level VARCHAR(10),               -- 'low', 'medium', 'high'
+
+    -- Temporal context
+    hour_bucket INTEGER NOT NULL,            -- 0-23
+    day_type VARCHAR(10) NOT NULL,           -- 'weekday', 'weekend'
+
+    -- CORE: Demographic-specific (THIS IS THE INNOVATION)
+    demographic_group VARCHAR(20) NOT NULL,  -- 'general', 'women', 'children', 'elderly'
+
+    -- Crime counts
+    raw_crime_count INTEGER,                 -- Total crimes matching demographic
+    weighted_crime_count DECIMAL(10,2),      -- After time-decay applied
+    crime_breakdown JSONB,                   -- {"sexual": 5, "assault": 12, ...}
+
+    -- Computed scores
+    risk_score DECIMAL(5,2) NOT NULL,        -- 0-100 normalized
+    confidence DECIMAL(3,2),                 -- Based on sample_size
+
+    -- Cache management
+    computed_at TIMESTAMP DEFAULT NOW(),
+    expires_at TIMESTAMP,
+    data_version INTEGER DEFAULT 1,
+    is_stale BOOLEAN DEFAULT FALSE,
+
+    -- Composite unique constraint
+    UNIQUE(grid_cell_id, hour_bucket, day_type, demographic_group)
+);
+
+-- Indexes for fast lookups
+CREATE INDEX idx_risk_location ON risk_cache(grid_cell_id);
+CREATE INDEX idx_risk_demographic ON risk_cache(demographic_group);
+CREATE INDEX idx_risk_time ON risk_cache(hour_bucket, day_type);
+CREATE INDEX idx_risk_staleness ON risk_cache(is_stale) WHERE is_stale = TRUE;
+CREATE INDEX idx_risk_spatial ON risk_cache USING GIST(center_point);
+```
+
+--------------------------------------------------------------------------------
+TABLE 3: CRIME_INCIDENTS (Core Crime Data) - From Original Design
+--------------------------------------------------------------------------------
+
+SCHEMA (unchanged from original):
+```sql
+CREATE TABLE crime_incidents (
+    id SERIAL PRIMARY KEY,
+    location GEOGRAPHY(POINT, 4326),
+    crime_type VARCHAR(50),
+    crime_category VARCHAR(50),          -- sexual, harassment, assault, theft, property
+    severity_weight DECIMAL(3,2),
+    occurred_at TIMESTAMP,
+    day_of_week INTEGER,
+    hour_of_day INTEGER,
+    victim_demographics JSONB,           -- {age_group, sex, race}
+    precinct VARCHAR(20),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_crime_location ON crime_incidents USING GIST(location);
+CREATE INDEX idx_crime_time ON crime_incidents(occurred_at);
+CREATE INDEX idx_crime_type ON crime_incidents(crime_category);
+```
+
+--------------------------------------------------------------------------------
+TABLE 4: DEMOGRAPHIC_IMPACT_WEIGHTS (Configurable Multipliers)
+--------------------------------------------------------------------------------
+
+PURPOSE: Research-backed multipliers for crimes that disproportionately
+         affect certain demographics (e.g., sexual crimes → women = 1.8x)
+
+SCHEMA (unchanged from original):
+```sql
+CREATE TABLE demographic_impact_weights (
+    id SERIAL PRIMARY KEY,
+    crime_category VARCHAR(50),
+    demographic_group VARCHAR(50),
+    impact_weight DECIMAL(3,2),
+    source VARCHAR(100),                 -- Research citation
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_demo_unique
+    ON demographic_impact_weights(crime_category, demographic_group);
+```
+
+--------------------------------------------------------------------------------
+OPEN QUESTIONS (To Decide)
+--------------------------------------------------------------------------------
+
+[ ] Time-decay weights: Store in DB or compute on-the-fly?
+    - Option A: Add decay_weight column to crime_incidents
+    - Option B: Compute during risk calculation (current preference)
+
+[ ] Demographic age mappings (NYPD data):
+    - Children: <18 only? or include 18-24?
+    - Elderly: 65+ only? or include 55-64?
+
+[ ] Multi-city support: Add city_code to tables now or later?
+
+[ ] crime_breakdown in risk_cache: By crime_type (granular) or crime_category (5 types)?
+
+================================================================================
+END OF UPDATE 2026-01-26
+================================================================================
+
+
+################################################################################
+#                     ORIGINAL RESEARCH 3 CONTENT BELOW                        #
+################################################################################
+
 DESIGN PHILOSOPHY (CORE ANCHOR)
 --------------------------------------------------------------------------------
 "Crime prediction is location-time based. Risk interpretation is demographic-context based."
