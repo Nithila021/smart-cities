@@ -81,14 +81,19 @@ def initialize_dbscan_clusters(df):
         dbscan = DBSCAN(eps=0.01, min_samples=5, algorithm='ball_tree', n_jobs=-1)
         quadrant_df.loc[:, 'temp_cluster'] = dbscan.fit_predict(coords_scaled)
         
-        # Skip outliers and renumber clusters with offset to avoid overlap
+        # Renumber clusters to avoid overlap and store profiles
         valid_clusters = [c for c in quadrant_df['temp_cluster'].unique() if c != -1]
+        
+        quadrant_df['dbscan_cluster'] = -1  # Initialize all as outliers
+        mask = quadrant_df['temp_cluster'] != -1
+        quadrant_df.loc[mask, 'dbscan_cluster'] = quadrant_df.loc[mask, 'temp_cluster'] + cluster_offset
+
         for cluster in valid_clusters:
-            global_cluster_id = cluster + cluster_offset
+            global_id = cluster + cluster_offset
             cluster_df = quadrant_df[quadrant_df['temp_cluster'] == cluster]
             crime_counts = cluster_df['crime_type'].value_counts()
             
-            all_clusters[global_cluster_id] = {
+            all_clusters[global_id] = {
                 'dominant_crime': crime_counts.idxmax() if not crime_counts.empty else "Unknown",
                 'common_crimes': crime_counts.nlargest(5).to_dict(),
                 'center_lat': cluster_df['latitude'].mean(),
@@ -101,36 +106,11 @@ def initialize_dbscan_clusters(df):
         if valid_clusters:
             cluster_offset = max(all_clusters.keys()) + 1
     
-    # Create a single combined result dataframe with global cluster IDs
-    result_df = pd.DataFrame()
-    
-    for quadrant_name, quadrant_df in quadrants.items():
-        # Skip if there's no temp_cluster column (means this quadrant was skipped earlier)
-        if 'temp_cluster' not in quadrant_df.columns:
-            continue
-        
-        # Make a copy to avoid SettingWithCopyWarning
-        quadrant_copy = quadrant_df.copy()
-        
-        # Create dbscan_cluster column with default value -1 (outliers)
-        quadrant_copy['dbscan_cluster'] = -1
-        
-        # Map temp clusters to global clusters (excluding outliers)
-        valid_temp_clusters = [c for c in quadrant_copy['temp_cluster'].unique() if c != -1]
-        for temp_cluster in valid_temp_clusters:
-            for global_id, cluster_info in all_clusters.items():
-                if cluster_info['quadrant'] == quadrant_name and \
-                   abs(cluster_info['center_lat'] - quadrant_copy[quadrant_copy['temp_cluster'] == temp_cluster]['latitude'].mean()) < 0.001 and \
-                   abs(cluster_info['center_lon'] - quadrant_copy[quadrant_copy['temp_cluster'] == temp_cluster]['longitude'].mean()) < 0.001:
-                    # Update the dbscan_cluster value for matching rows
-                    quadrant_copy.loc[quadrant_copy['temp_cluster'] == temp_cluster, 'dbscan_cluster'] = global_id
-                    break
-        
-        # Add only the required columns to the result DataFrame
-        result_cols = ['latitude', 'longitude', 'dbscan_cluster']
-        if 'crime_type' in quadrant_copy.columns:
-            result_cols.append('crime_type')
-        result_df = pd.concat([result_df, quadrant_copy[result_cols]])
+    # Concatenate results efficiently
+    result_df = pd.concat([
+        q_df[['latitude', 'longitude', 'dbscan_cluster', 'crime_type']] 
+        for q_df in quadrants.values() if 'dbscan_cluster' in q_df.columns
+    ])
     
     # Store model components for future predictions
     if result_df.empty:
