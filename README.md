@@ -129,8 +129,12 @@ cd smart-cities-main   # or the folder name where you cloned this repo
 pip install -r requirements.txt
 ```
 
-3. **Ensure crime data is available**
-Place `NYPD_Complaint_Data_YTD.csv` in the `backend/` directory.
+3. **Download required datasets**
+See [DATA_SOURCES.md](DATA_SOURCES.md) for complete download instructions.
+
+**Quick Start:**
+- Download NYPD Crime Data: https://data.cityofnewyork.us/Public-Safety/NYPD-Complaint-Data-Current-Year-To-Date-/5uac-w243
+- Place `NYPD_Complaint_Data_YTD.csv` in the project root or `backend/` directory
 
 4. **Start the Flask backend**
 ```bash

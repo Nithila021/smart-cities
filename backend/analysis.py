@@ -223,15 +223,15 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
     if time_analysis:
         analysis['time_analysis'] = time_analysis
     
-    if dbscan_info:
+    if dbscan_info and dbscan_cluster is not None:
         analysis['dbscan_cluster'] = {
             'cluster_id': int(dbscan_cluster),
             'dominant_crime': dbscan_info['dominant_crime'],
             'common_crimes': dbscan_info['common_crimes'],
             'crime_count': dbscan_info['crime_count']
         }
-    
-    if demographic_info:
+
+    if demographic_info and demographic_zone is not None:
         analysis['demographic_zone'] = {
             'zone_id': int(demographic_zone),
             'profiles': demographic_info['concentration_scores'],
