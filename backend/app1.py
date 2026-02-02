@@ -248,7 +248,18 @@ def chat_endpoint():
         if demographics:
             demographic_profile = parse_demographic_group(demographics)
 
-        if coords := get_coordinates(location):
+        # Try geocoding the full string first
+        coords = get_coordinates(location)
+        
+        # If full string fails and we have a comma (potential <amenity>, <address> format)
+        if not coords and ',' in location:
+            parts = location.split(',', 1)
+            if len(parts) > 1:
+                potential_address = parts[1].strip()
+                print(f"Full string geocode failed. Retrying with potential address: '{potential_address}'")
+                coords = get_coordinates(potential_address)
+
+        if coords:
             lat, lon = coords
             analysis = analyze_safety(lat, lon)
             amenities = analyze_amenities(lat, lon)
