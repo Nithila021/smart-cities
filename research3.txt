@@ -3,16 +3,46 @@ RESEARCH 3: UNIFIED SYSTEM DESIGN & IMPLEMENTATION PLAN
 Combining Augment Analysis + ChatGPT Architecture Recommendations
 ================================================================================
 
-################################################################################
-#                           CHANGELOG / UPDATES                                 #
-#  New decisions go here. Old content preserved below for reference.           #
-################################################################################
-
 ================================================================================
-UPDATE 2026-01-26: DATABASE SCHEMA DECISIONS (Nithila + Augment)
+IMPLEMENTATION STATUS SNAPSHOT (as of 2026-02-01)
 ================================================================================
 
-STATUS: DECIDED - Ready for implementation
+This document is the **design source of truth**. Below is a quick status view
+of how much of it is already reflected in the current repo.
+
+- DATA LAYER
+  - Implemented: CSV-based NYPD cleaner (`backend/data_cleaner.py`) and
+    in-memory cache (`backend/data_init.py`).
+  - Implemented: PostgreSQL + PostGIS instance with NYPD crime data migrated
+    (manual setup; app still reads from CSV for now).
+  - Planned: Move schema into code (`schema.sql`, `migrate_data.py`,
+    `db_config.py`) and wire Flask to read from Postgres instead of CSV.
+  - Planned: Real amenities via Overpass, 311 complaints, lighting, transit.
+
+- ML LAYER
+  - Implemented: K-Means / DBSCAN / KDE clustering & density
+    (`backend/models.py`).
+  - Planned: Crime-type RiskVector, time-decay weighting, XGBoost,
+    confidence intervals, proper feature importance.
+
+- DEMOGRAPHIC PERSONALIZATION
+  - Implemented: Demographic impact weights and personalized text
+    recommendations (`backend/analysis.py`, `backend/demographic_parser.py`).
+  - Planned: Exposure multipliers, explicit `PersonalizedRisk` pipeline,
+    and new `/personalized-risk`, `/compare-places`, `/safe-times` endpoints.
+
+- LLM + VISUALIZATION
+  - Planned: LLM explanation service and advanced Mapbox / uncertainty
+    visualization on the frontend.
+
+See **PART 4: IMPLEMENTATION PHASES** and **PART 7: CODE MAPPING** below for
+more detailed, per-task status.
+
+================================================================================
+DATABASE SCHEMA & RISK CACHE DESIGN (DECIDED)
+================================================================================
+
+STATUS: Ready for implementation
 
 ## SUMMARY OF KEY DECISIONS:
 
@@ -37,41 +67,18 @@ WORKFLOW:
   4. Cache HIT + fresh (<30 days) → Return cached
   5. Cache HIT + stale (>30 days) → Return cached, queue background refresh
 
-SCHEMA:
-```sql
-CREATE TABLE amenities (
-    id SERIAL PRIMARY KEY,
+KEY FIELDS (for schema.sql):
+- Core: `id` (PK), `name`, `location GEOGRAPHY(POINT,4326)`
+- Classification: `amenity_type`, `amenity_tags JSONB`
+- External link: `external_id`, `external_api_source`
+- Operational: `operating_hours JSONB`, `neighborhood`
+- Cache: `created_at`, `last_verified_at`, `verification_count`
+- Risk: `risk_modifier` (e.g. 1.2 = increases risk, 0.8 = decreases)
 
-    -- Core identity
-    name VARCHAR(255) NOT NULL,
-    location GEOGRAPHY(POINT, 4326) NOT NULL,
-
-    -- Classification
-    amenity_type VARCHAR(50) NOT NULL,     -- Primary: bar, restaurant, park, transit
-    amenity_tags JSONB,                     -- Additional: ["nightclub", "live_music"]
-
-    -- External API linkage
-    external_id VARCHAR(100),               -- place_id (Google) or osm_id (Overpass)
-    external_api_source VARCHAR(30),        -- 'google_places', 'overpass', 'nominatim'
-
-    -- Operational data
-    operating_hours JSONB,                  -- {"mon": "09:00-22:00", ...}
-    neighborhood VARCHAR(100),
-
-    -- Cache management
-    created_at TIMESTAMP DEFAULT NOW(),
-    last_verified_at TIMESTAMP DEFAULT NOW(),
-    verification_count INTEGER DEFAULT 1,   -- How many times queried
-
-    -- Risk modifiers (ML can populate this)
-    risk_modifier DECIMAL(3,2) DEFAULT 1.0  -- 1.2 = increases risk, 0.8 = decreases
-);
-
--- Indexes
-CREATE INDEX idx_amenity_location ON amenities USING GIST(location);
-CREATE INDEX idx_amenity_type ON amenities(amenity_type);
-CREATE INDEX idx_amenity_external ON amenities(external_api_source, external_id);
-```
+INDEXES:
+- GIST index on `location`
+- B-tree index on `amenity_type`
+- B-tree index on (`external_api_source`, `external_id`)
 
 --------------------------------------------------------------------------------
 TABLE 2: RISK_CACHE (Demographic-Specific ML-Computed Risk Scores)
@@ -112,100 +119,48 @@ CACHE INVALIDATION:
   - Daily job marks cells as stale if new crimes added
   - Background job recomputes stale cells
 
-SCHEMA:
-```sql
-CREATE TABLE risk_cache (
-    id SERIAL PRIMARY KEY,
+KEY FIELDS (for schema.sql):
+- Identity/location: `id` (PK), `grid_cell_id`, `center_point GEOGRAPHY(POINT,4326)`
+- Clustering context: `zone_id`, `dbscan_cluster_id`, `density_level`
+- Time context: `hour_bucket`, `day_type`
+- Demographic: `demographic_group`
+- Counts: `raw_crime_count`, `weighted_crime_count`, `crime_breakdown JSONB`
+- Scores: `risk_score`, `confidence`
+- Cache: `computed_at`, `expires_at`, `data_version`, `is_stale`
 
-    -- Location identifiers
-    grid_cell_id VARCHAR(20) NOT NULL,      -- "40.758_-73.985" or H3 index
-    center_point GEOGRAPHY(POINT, 4326),
+CONSTRAINTS / INDEXES:
+- UNIQUE (`grid_cell_id`, `hour_bucket`, `day_type`, `demographic_group`)
+- Indexes on `grid_cell_id`, `demographic_group`, (`hour_bucket`, `day_type`)
+- Partial index on `is_stale` WHERE `is_stale = TRUE`
+- GIST index on `center_point`
 
-    -- Clustering context (from existing ML models)
-    zone_id INTEGER,                         -- K-Means zone (0-29)
-    dbscan_cluster_id INTEGER,               -- NULL if not in hotspot
-    density_level VARCHAR(10),               -- 'low', 'medium', 'high'
-
-    -- Temporal context
-    hour_bucket INTEGER NOT NULL,            -- 0-23
-    day_type VARCHAR(10) NOT NULL,           -- 'weekday', 'weekend'
-
-    -- CORE: Demographic-specific (THIS IS THE INNOVATION)
-    demographic_group VARCHAR(20) NOT NULL,  -- 'general', 'women', 'children', 'elderly'
-
-    -- Crime counts
-    raw_crime_count INTEGER,                 -- Total crimes matching demographic
-    weighted_crime_count DECIMAL(10,2),      -- After time-decay applied
-    crime_breakdown JSONB,                   -- {"sexual": 5, "assault": 12, ...}
-
-    -- Computed scores
-    risk_score DECIMAL(5,2) NOT NULL,        -- 0-100 normalized
-    confidence DECIMAL(3,2),                 -- Based on sample_size
-
-    -- Cache management
-    computed_at TIMESTAMP DEFAULT NOW(),
-    expires_at TIMESTAMP,
-    data_version INTEGER DEFAULT 1,
-    is_stale BOOLEAN DEFAULT FALSE,
-
-    -- Composite unique constraint
-    UNIQUE(grid_cell_id, hour_bucket, day_type, demographic_group)
-);
-
--- Indexes for fast lookups
-CREATE INDEX idx_risk_location ON risk_cache(grid_cell_id);
-CREATE INDEX idx_risk_demographic ON risk_cache(demographic_group);
-CREATE INDEX idx_risk_time ON risk_cache(hour_bucket, day_type);
-CREATE INDEX idx_risk_staleness ON risk_cache(is_stale) WHERE is_stale = TRUE;
-CREATE INDEX idx_risk_spatial ON risk_cache USING GIST(center_point);
-```
-
---------------------------------------------------------------------------------
 TABLE 3: CRIME_INCIDENTS (Core Crime Data) - From Original Design
 --------------------------------------------------------------------------------
 
-SCHEMA (unchanged from original):
-```sql
-CREATE TABLE crime_incidents (
-    id SERIAL PRIMARY KEY,
-    location GEOGRAPHY(POINT, 4326),
-    crime_type VARCHAR(50),
-    crime_category VARCHAR(50),          -- sexual, harassment, assault, theft, property
-    severity_weight DECIMAL(3,2),
-    occurred_at TIMESTAMP,
-    day_of_week INTEGER,
-    hour_of_day INTEGER,
-    victim_demographics JSONB,           -- {age_group, sex, race}
-    precinct VARCHAR(20),
-    created_at TIMESTAMP DEFAULT NOW()
-);
+KEY FIELDS (for schema.sql):
+- `id` (PK), `location GEOGRAPHY(POINT,4326)`
+- `crime_type`, `crime_category`, `severity_weight`
+- `occurred_at`, `day_of_week`, `hour_of_day`
+- `victim_demographics JSONB`, `precinct`, `created_at`
 
-CREATE INDEX idx_crime_location ON crime_incidents USING GIST(location);
-CREATE INDEX idx_crime_time ON crime_incidents(occurred_at);
-CREATE INDEX idx_crime_type ON crime_incidents(crime_category);
-```
+INDEXES:
+- GIST index on `location`
+- B-tree index on `occurred_at`
+- B-tree index on `crime_category`
 
---------------------------------------------------------------------------------
 TABLE 4: DEMOGRAPHIC_IMPACT_WEIGHTS (Configurable Multipliers)
 --------------------------------------------------------------------------------
 
 PURPOSE: Research-backed multipliers for crimes that disproportionately
          affect certain demographics (e.g., sexual crimes → women = 1.8x)
 
-SCHEMA (unchanged from original):
-```sql
-CREATE TABLE demographic_impact_weights (
-    id SERIAL PRIMARY KEY,
-    crime_category VARCHAR(50),
-    demographic_group VARCHAR(50),
-    impact_weight DECIMAL(3,2),
-    source VARCHAR(100),                 -- Research citation
-    updated_at TIMESTAMP DEFAULT NOW()
-);
+KEY FIELDS (for schema.sql):
+- `id` (PK)
+- `crime_category`, `demographic_group`
+- `impact_weight`, `source`, `updated_at`
 
-CREATE UNIQUE INDEX idx_demo_unique
-    ON demographic_impact_weights(crime_category, demographic_group);
-```
+CONSTRAINTS / INDEXES:
+- UNIQUE (`crime_category`, `demographic_group`)
 
 --------------------------------------------------------------------------------
 OPEN QUESTIONS (To Decide)
@@ -223,15 +178,6 @@ OPEN QUESTIONS (To Decide)
 
 [ ] crime_breakdown in risk_cache: By crime_type (granular) or crime_category (5 types)?
 
-================================================================================
-END OF UPDATE 2026-01-26
-================================================================================
-
-
-################################################################################
-#                     ORIGINAL RESEARCH 3 CONTENT BELOW                        #
-################################################################################
-
 DESIGN PHILOSOPHY (CORE ANCHOR)
 --------------------------------------------------------------------------------
 "Crime prediction is location-time based. Risk interpretation is demographic-context based."
@@ -245,68 +191,23 @@ Your system:
 PART 1: UNIFIED 6-LAYER ARCHITECTURE
 ================================================================================
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER A: Global Crime Intelligence (Data Ingestion)                        │
-│  ├── Historical crime incidents (NYPD data)                                 │
-│  ├── 311 Complaints data (NEW - broken windows indicator)                   │
-│  ├── Real amenity/POI data via Overpass API (REPLACE fake data)            │
-│  └── Street lighting, transit proximity (NEW)                               │
-│  OUTPUT: Clean, validated, multi-source crime events                        │
-│  DATABASE: PostgreSQL + PostGIS (UPGRADE from CSV/in-memory)                │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER B: Spatio-Temporal Risk Modeling (ML Engine)                         │
-│  ├── CURRENT: KDE, K-Means, DBSCAN                                          │
-│  ├── ADD: XGBoost for feature importance + interpretability                 │
-│  ├── ADD: Time-decay weighting (recent crimes matter more)                  │
-│  ├── FUTURE: ST-GCN for advanced spatiotemporal patterns                    │
-│  OUTPUT: Continuous Risk(lat, lon, time) per crime type                     │
-│  KEY CHANGE: From hard clusters → continuous risk surfaces                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER C: Crime-Type Risk Decomposition                                     │
-│  OUTPUT: RiskVector(place, time) = {                                        │
-│      sexual_offense_risk,                                                   │
-│      harassment_risk,                                                       │
-│      violent_assault_risk,                                                  │
-│      theft_risk,                                                            │
-│      property_crime_risk                                                    │
-│  }                                                                          │
-│  WHY: Enables demographic-specific interpretation                           │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER D: Demographic Impact & Exposure Layer (YOUR CORE IDEA)              │
-│  ├── User Context: demographics, group_size, time_window, venue_type        │
-│  ├── Impact Matrix: How crime types affect different groups                 │
-│  ├── Exposure Multiplier: f(group_size, time, venue_type)                   │
-│  └── Uncertainty Quantification (NEW - confidence intervals)                │
-│  THIS IS WHERE YOUR UNIQUE VALUE PROPOSITION LIVES                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER E: Personalized Risk Decision Engine                                 │
-│  FORMULA:                                                                   │
-│  PersonalizedRisk = Σ [ CrimeRisk_type(place,time)                          │
-│                        × DemographicImpact(type,user)                       │
-│                        × ExposureMultiplier(user,context) ]                 │
-│                                                                             │
-│  ConfidenceScore = f(data_density, recency, sample_size)                    │
-│                                                                             │
-│  ANSWERS: "Is Bar A safer for women at 8PM or 11PM?"                        │
-│           "Which park is safer for children in the morning?"                │
-│           "How confident is this assessment?"                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LAYER F: Explanation & Visualization Layer                                 │
-│  ├── LLM Integration: Natural language safety explanations (NEW)            │
-│  ├── Mapbox GL JS: 3D visualization, WebGL performance (UPGRADE)            │
-│  ├── Uncertainty visualization: Show confidence in scores                   │
-│  └── Temporal patterns: Interactive time-based risk views                   │
-└─────────────────────────────────────────────────────────────────────────────┘
+LAYERS (high-level summary):
+- **Layer A – Global Crime Intelligence (Data Ingestion)**  
+  Historical NYPD crime, 311 complaints, real amenities (Overpass), lighting,
+  transit → clean multi-source events stored in PostgreSQL + PostGIS.
+- **Layer B – Spatio-Temporal Risk Modeling (ML Engine)**  
+  KDE, K-Means, DBSCAN now; later XGBoost and time-decay → continuous
+  `Risk(lat, lon, time)` per crime type.
+- **Layer C – Crime-Type Risk Decomposition**  
+  Outputs `RiskVector(place,time)` = {sexual, harassment, violent assault,
+  theft, property}.
+- **Layer D – Demographic Impact & Exposure (core idea)**  
+  Applies impact matrix + exposure multipliers + uncertainty.
+- **Layer E – Personalized Risk Decision Engine**  
+  `PersonalizedRisk = Σ CrimeRisk_type × DemographicImpact × ExposureMultiplier`,
+  plus a confidence score.
+- **Layer F – Explanation & Visualization Layer**  
+  LLM explanations, map visualizations, uncertainty, and temporal patterns.
 
 ================================================================================
 PART 2: DEMOGRAPHIC IMPACT MATRIX (Formalized)
@@ -373,18 +274,17 @@ PHASE 1: DATA FOUNDATION (Week 1-2)
 ────────────────────────────────────
 Priority: HIGH | Effort: MEDIUM
 
-Tasks:
-[ ] Set up PostgreSQL + PostGIS database
-[ ] Design schema for crimes, amenities, risk_scores
-[ ] Migrate existing NYPD CSV data to database
+Tasks (status as of 2026-02-01):
+[x] Set up PostgreSQL + PostGIS database
+    - DB is running locally with PostGIS enabled.
+[x] Design schema for crimes, amenities, risk_scores
+    - See TABLES 1–4 above.
+[x] Migrate existing NYPD CSV data to database
+    - ~435k NYPD records loaded into Postgres.
 [ ] Implement Overpass API integration for real POI data
 [ ] Add 311 complaints data from NYC Open Data
-[ ] Create data validation and cleaning pipeline
-
-Deliverables:
-- Working database with spatial indexing
-- Real amenity data replacing fake data
-- Multi-source data integration
+[x] Create data validation and cleaning pipeline
+    - Implemented in `backend/data_cleaner.py` and used by `backend/data_init.py`.
 
 PHASE 2: ML MODEL UPGRADES (Week 3-4)
 ─────────────────────────────────────
@@ -398,17 +298,14 @@ Tasks:
 [ ] Create continuous risk surfaces (upgrade from hard clusters)
 [ ] Implement feature importance extraction
 
-Deliverables:
-- Crime-type-specific risk modeling
-- Uncertainty quantification on all scores
-- Interpretable feature importance
-
 PHASE 3: DEMOGRAPHIC PERSONALIZATION ENGINE (Week 5-6)
 ──────────────────────────────────────────────────────
 Priority: HIGH | Effort: MEDIUM
 
-Tasks:
-[ ] Implement Demographic Impact Matrix (configurable weights)
+Tasks (status as of 2026-02-01):
+[x] Implement Demographic Impact Matrix (configurable weights)
+    - Implemented in code as DEFAULT_DEMOGRAPHIC_WEIGHTS in `backend/analysis.py`.
+      External JSON config file is still TODO.
 [ ] Create Exposure Multiplier calculation
 [ ] Build PersonalizedRisk formula implementation
 [ ] Add user context input (group size, demographics, venue type)
@@ -416,10 +313,9 @@ Tasks:
 [ ] Create /compare-places API endpoint
 [ ] Create /safe-times API endpoint
 
-Deliverables:
-- Demographic-aware risk scoring
-- Place comparison functionality
-- Time-window recommendations
+NOTE: The current backend already applies demographic-specific weighting and
+generates group-aware text recommendations, but the full Phase 3 API surface
+is not yet implemented.
 
 PHASE 4: LLM INTEGRATION (Week 7-8)
 ───────────────────────────────────
@@ -433,11 +329,6 @@ Tasks:
 [ ] Add natural language query interface
 [ ] Cache common explanations for performance
 
-Deliverables:
-- Natural language safety explanations
-- Personalized recommendations in plain English
-- Conversational query support
-
 PHASE 5: VISUALIZATION UPGRADE (Week 9-10)
 ──────────────────────────────────────────
 Priority: MEDIUM | Effort: MEDIUM
@@ -450,198 +341,103 @@ Tasks:
 [ ] Add 3D visualization for crime density
 [ ] Optimize performance for large datasets
 
-Deliverables:
-- Enhanced interactive mapping
-- Uncertainty visualization
-- Time-based exploration
-
 ================================================================================
 PART 5: NEW API ENDPOINTS SPECIFICATION
 ================================================================================
 
 ENDPOINT: POST /personalized-risk
 ─────────────────────────────────
-Request:
-{
-  "location": {"lat": 40.7128, "lon": -74.0060},
-  "user_profile": {
-    "demographic": "woman",        // woman, child, elderly, general
-    "age_group": "25-34",
-    "group_size": 1,               // 1 = alone
-    "group_composition": "solo"    // solo, mixed, same_gender
-  },
-  "context": {
-    "time": "2024-01-15T23:00:00",
-    "venue_type": "bar",           // bar, park, street, transit
-    "planned_duration": 120        // minutes
-  }
-}
-
-Response:
-{
-  "personalized_risk_score": 67,
-  "confidence": 0.78,
-  "risk_breakdown": {
-    "sexual_offense": {"base": 12, "adjusted": 18},
-    "harassment": {"base": 25, "adjusted": 38},
-    "assault": {"base": 15, "adjusted": 23},
-    "theft": {"base": 20, "adjusted": 24}
-  },
-  "safer_alternatives": {
-    "safer_time": "19:00-21:00",
-    "time_risk_reduction": 35,
-    "nearby_safer_venues": [...]
-  },
-  "explanation": "Harassment incidents increase after 10 PM in this area..."
-}
+- **Purpose**: Personalized risk for a single place, for a specific user
+  profile and time.
+- **Request fields**:
+  - `location`: `{lat, lon}`
+  - `user_profile`: demographic, age_group, group_size, group_composition
+  - `context`: time, venue_type (bar, park, street, transit),
+    planned_duration (minutes)
+- **Response fields**:
+  - `personalized_risk_score` (0–100) and `confidence`
+  - `risk_breakdown` per crime type (base vs adjusted)
+  - `safer_alternatives` (safer_time window, time_risk_reduction,
+    nearby_safer_venues)
+  - short text `explanation`.
 
 ENDPOINT: POST /compare-places
 ──────────────────────────────
-Request:
-{
-  "places": [
-    {"name": "Bar A", "lat": 40.7128, "lon": -74.0060},
-    {"name": "Bar B", "lat": 40.7150, "lon": -74.0080}
-  ],
-  "user_profile": {...},
-  "time": "2024-01-15T22:00:00"
-}
-
-Response:
-{
-  "comparison": [
-    {
-      "name": "Bar A",
-      "personalized_risk": 67,
-      "confidence": 0.78,
-      "dominant_risk_type": "harassment"
-    },
-    {
-      "name": "Bar B",
-      "personalized_risk": 45,
-      "confidence": 0.82,
-      "dominant_risk_type": "theft"
-    }
-  ],
-  "recommendation": "Bar B shows 33% lower risk for your profile...",
-  "safer_choice": "Bar B"
-}
+- **Purpose**: Compare multiple candidate places for the same user/time.
+- **Request fields**:
+  - `places`: list of `{name, lat, lon}`
+  - `user_profile`
+  - `time`
+- **Response fields**:
+  - list of `{name, personalized_risk, confidence, dominant_risk_type}`
+  - `recommendation` text and `safer_choice` label.
 
 ENDPOINT: GET /safe-times
 ─────────────────────────
-Request:
-{
-  "location": {"lat": 40.7128, "lon": -74.0060},
-  "user_profile": {...},
-  "date": "2024-01-15"
-}
-
-Response:
-{
-  "time_windows": [
-    {"start": "06:00", "end": "09:00", "risk": 25, "label": "LOW"},
-    {"start": "09:00", "end": "17:00", "risk": 35, "label": "LOW"},
-    {"start": "17:00", "end": "21:00", "risk": 52, "label": "MEDIUM"},
-    {"start": "21:00", "end": "00:00", "risk": 78, "label": "HIGH"},
-    {"start": "00:00", "end": "06:00", "risk": 85, "label": "HIGH"}
-  ],
-  "safest_window": {"start": "06:00", "end": "09:00"},
-  "explanation": "Morning hours show lowest harassment risk..."
-}
+- **Purpose**: Suggest safer time windows for a given place and user profile.
+- **Request fields**:
+  - `location`
+  - `user_profile`
+  - `date` (optional; default = typical pattern)
+- **Response fields**:
+  - `time_windows`: list of `{start, end, risk, label}`
+  - `safest_window`
+  - explanation text about temporal pattern.
 
 ================================================================================
-PART 6: DATABASE SCHEMA (PostgreSQL + PostGIS)
+PART 7: CODE MAPPING - What Changed Where (Current Repo)
 ================================================================================
 
--- Core crime incidents table
-CREATE TABLE crime_incidents (
-    id SERIAL PRIMARY KEY,
-    location GEOGRAPHY(POINT, 4326),
-    crime_type VARCHAR(50),
-    crime_category VARCHAR(50),  -- sexual, harassment, assault, theft, property
-    severity_weight DECIMAL(3,2),
-    occurred_at TIMESTAMP,
-    day_of_week INTEGER,
-    hour_of_day INTEGER,
-    victim_demographics JSONB,
-    precinct VARCHAR(20),
-    created_at TIMESTAMP DEFAULT NOW()
-);
+This section maps the architecture to the **actual Python modules** that exist
+in the repo right now, and highlights what is already done vs still TODO.
 
--- Spatial index for fast queries
-CREATE INDEX idx_crime_location ON crime_incidents USING GIST(location);
-CREATE INDEX idx_crime_time ON crime_incidents(occurred_at);
-CREATE INDEX idx_crime_type ON crime_incidents(crime_category);
+BACKEND MODULES:
 
--- Real amenities/POIs
-CREATE TABLE amenities (
-    id SERIAL PRIMARY KEY,
-    location GEOGRAPHY(POINT, 4326),
-    name VARCHAR(255),
-    amenity_type VARCHAR(50),  -- bar, restaurant, park, transit_station
-    operating_hours JSONB,
-    neighborhood VARCHAR(100)
-);
+1. data_cleaner.py + data_init.py
+   - DONE:
+     - Centralized CSV cleaning and validation pipeline.
+     - In-memory caching of cleaned DataFrame and derived objects.
+   - TODO:
+     - Move schema + migration into code (`schema.sql`, `migrate_data.py`).
+     - PostgreSQL connection + loaders (`db_config.py`).
+     - Overpass API integration for real POIs.
+     - 311 complaints data loader.
 
--- Pre-computed risk scores (cached)
-CREATE TABLE risk_cache (
-    id SERIAL PRIMARY KEY,
-    grid_cell_id VARCHAR(50),  -- H3 or custom grid
-    center_point GEOGRAPHY(POINT, 4326),
-    crime_category VARCHAR(50),
-    hour_bucket INTEGER,       -- 0-23
-    day_type VARCHAR(10),      -- weekday, weekend
-    risk_score DECIMAL(5,2),
-    confidence DECIMAL(3,2),
-    sample_size INTEGER,
-    computed_at TIMESTAMP,
-    expires_at TIMESTAMP
-);
+2. models.py + analysis.py
+   - DONE:
+     - K-Means / DBSCAN / KDE clustering and density zones.
+     - Basic safety scoring and crime breakdown for a location.
+   - TODO:
+     - Separate analysis by crime_category into a full RiskVector.
+     - Time-decay weighting function.
+     - Confidence interval calculation for scores.
+     - XGBoost (or similar) model for feature importance / prediction.
 
--- Demographic impact weights (configurable)
-CREATE TABLE demographic_impact_weights (
-    id SERIAL PRIMARY KEY,
-    crime_category VARCHAR(50),
-    demographic_group VARCHAR(50),
-    impact_weight DECIMAL(3,2),
-    source VARCHAR(100),       -- research citation
-    updated_at TIMESTAMP
-);
+3. demographic_parser.py (future: personalization_engine.py)
+   - DONE:
+     - Parsing natural-language group descriptions into a profile.
+     - Generating personalized text recommendations based on profile
+       and crime types.
+   - TODO:
+     - DemographicImpactMatrix and ExposureMultiplier as reusable
+       classes/utilities.
+     - PersonalizedRiskCalculator and PlaceComparator helpers used by
+       future endpoints.
 
-================================================================================
-PART 7: CODE MAPPING - What Changes Where
-================================================================================
+4. (future) llm_service.py
+   - TODO:
+     - OpenAI/Claude integration.
+     - Prompt templates for explanations.
+     - Explanation caching.
 
-BACKEND FILES TO MODIFY:
-
-1. data_loader.py
-   - REMOVE: Fake amenity data generation
-   - ADD: PostgreSQL connection
-   - ADD: Overpass API integration for real POIs
-   - ADD: 311 data loader
-
-2. crime_analyzer.py
-   - MODIFY: Separate analysis by crime_category
-   - ADD: Time-decay weighting function
-   - ADD: Confidence interval calculation
-   - ADD: XGBoost model alongside existing models
-
-3. NEW FILE: personalization_engine.py
-   - ADD: DemographicImpactMatrix class
-   - ADD: ExposureMultiplier calculator
-   - ADD: PersonalizedRiskCalculator
-   - ADD: PlaceComparator
-
-4. NEW FILE: llm_service.py
-   - ADD: OpenAI/Claude integration
-   - ADD: Prompt templates for explanations
-   - ADD: Explanation caching
-
-5. app.py (Flask routes)
-   - ADD: /personalized-risk endpoint
-   - ADD: /compare-places endpoint
-   - ADD: /safe-times endpoint
-   - MODIFY: Existing endpoints to include confidence
+5. app1.py (Flask routes)
+   - CURRENT:
+     - Existing safety-score style endpoint(s) backed by CSV pipeline.
+   - TODO:
+     - /personalized-risk endpoint.
+     - /compare-places endpoint.
+     - /safe-times endpoint.
+     - Extend responses to include confidence and richer breakdowns.
 
 FRONTEND FILES TO MODIFY:
 
@@ -695,32 +491,6 @@ Key papers to cite:
 1. "Crime Prediction Using Machine Learning" - IEEE Smart Cities 2024
 2. "Spatiotemporal Crime Hotspot Detection" - ACM SIGSPATIAL 2023
 3. "Ethical Considerations in Predictive Policing" - Nature 2022
-
-================================================================================
-SUMMARY: WHAT CHANGED VS WHAT STAYED
-================================================================================
-
-✗ REMOVED (Old Approach):
-- Hard cluster boundaries
-- Exact demographic matching
-- Single overall safety score
-- No uncertainty
-- Fake amenity data
-
-✓ PRESERVED (Your Core Ideas):
-- Demographic-wise analysis
-- Group vs solo considerations
-- Time-based decisions
-- Place comparison (bar vs bar, park vs park)
-- User-specific risk computation
-
-✓ ADDED (Upgrades):
-- Continuous risk surfaces
-- Crime-type-aware personalization
-- Confidence scores
-- LLM explanations
-- Real data sources
-- Proper database
 
 ================================================================================
 END OF RESEARCH 3

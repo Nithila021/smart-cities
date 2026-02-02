@@ -3,12 +3,13 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import os
+from typing import Any, Dict
 
 # Import the data cleaner module
-from data_cleaner import DataCleaner, load_and_clean_csv, SEVERITY_WEIGHTS
+from data_cleaner import load_and_clean_csv, SEVERITY_WEIGHTS
 
 # Global cached data
-cached_data = {
+cached_data: Dict[str, Any] = {
     'df': None,
     'crime_clusters': None,
     'zone_safety_scores': None,
@@ -23,7 +24,7 @@ cached_data = {
 }
 
 
-def prepare_data():
+def prepare_data() -> pd.DataFrame:
     """Load and preprocess raw NYPD crime data using the data_cleaner module.
 
     This function is responsible only for I/O and cleaning and returns a
@@ -62,7 +63,7 @@ def prepare_data():
     return df
 
 
-def train_models(df):
+def train_models(df: pd.DataFrame) -> None:
     """Train clustering / density models and populate the global cache.
 
     Receives a cleaned DataFrame and is responsible for fitting models and
@@ -124,7 +125,7 @@ def train_models(df):
     initialize_crime_density_zones(df)
 
 
-def initialize_data():
+def initialize_data() -> pd.DataFrame:
     """Top-level initializer that loads data and trains models.
 
     This preserves the existing public API while delegating to
@@ -136,7 +137,7 @@ def initialize_data():
     print(f"Data initialization complete. {len(df)} records processed.")
     return df
 
-def load_amenity_data():
+def load_amenity_data() -> pd.DataFrame:
     """Load amenity data if available"""
     if cached_data.get('amenities_df') is not None:
         return cached_data['amenities_df']
