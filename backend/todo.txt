@@ -1,0 +1,22 @@
+SMART CITIES - BACKEND TODO
+
+DONE:
+- Basic ML infrastructure (K-Means, DBSCAN, KDE).
+- Data cleaning pipeline for NYPD CSVs.
+- Prototype demographic parser for group-specific advice.
+- Flask API with exploration and chat endpoints.
+
+SHOULD BE CHANGED:
+- Replace dummy/fake amenity data with real Overpass API queries.
+- Shift from string-template "AI" reports to real LLM integration.
+- Replace in-memory Pandas caching with a persistent PostGIS database.
+
+LEFT TO DO:
+- Integrate 311 complaints (Indicator of broken windows/risk).
+- Implement advanced models (XGBoost for importance, ST-GCN for forecasting).
+- Add uncertainty scores (Confidence intervals) to risk results.
+- Create production endpoints: /personalized-risk, /compare-places, /safe-times.
+
+
+nikhils list
+Amenity data file not found. Creating dummy data. (WHATS THIS)

@@ -652,5 +652,4 @@ if __name__ == "__main__":
 
     # Show sample of cleaned data
     print("\nSample of cleaned data:")
-    print(clean_df.head())
 

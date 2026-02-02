@@ -11,13 +11,18 @@ app = Flask(__name__)
 
 # Configure CORS
 CORS(app, resources={
-	    r"/*": {
-	        "origins": [
-	            "http://localhost:3000",  # Local development
-	            "http://localhost:5000",  # Local development (if needed)
-	            "https://your-frontend-domain.com"  # Replace with your actual frontend domain
-	        ]
-	    }
+    r"/*": {
+        "origins": [
+            "http://localhost",
+            "http://localhost:80",
+            "http://127.0.0.1",
+            "http://127.0.0.1:80",
+            "http://localhost:3000",
+            "http://localhost:5000"
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
 })
 
 
@@ -223,8 +228,12 @@ def map_data_endpoint():
 def chat_endpoint():
     try:
         data = request.get_json()
+        print("DATA")
+        print(data)
         location = data.get('message', '')
+        print(location)
         demographics = data.get('demographics', '')  # Optional custom demographics
+        print(demographics)
         
         if not location:
             return jsonify({"error": "Empty request"}), 400

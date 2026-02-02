@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: 
+      context: ./backend 
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+      - ./NYPD_Complaint_Data_YTD/NYPD_Complaint_Data_YTD.csv:/app/NYPD_Complaint_Data_YTD.csv
+      - ./NYPD_Complaint_Data_Historic/NYPD_Complaint_Data_Historic.csv:/app/NYPD_Complaint_Data_Historic.csv
+    environment:
+      - ACTIVE_CITY=nyc
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: always
