@@ -109,8 +109,8 @@ def auto_detect_bounds(df: pd.DataFrame,
     upper = 1 - lower
 
     # Get numeric coordinates only
-    lat_series = pd.to_numeric(df[lat_col], errors='coerce').dropna()
-    lon_series = pd.to_numeric(df[lon_col], errors='coerce').dropna()
+    lat_series = df[lat_col].apply(pd.to_numeric, errors='coerce').dropna()
+    lon_series = df[lon_col].apply(pd.to_numeric, errors='coerce').dropna()
 
     bounds = {
         'lat_min': float(lat_series.quantile(lower)),
@@ -122,7 +122,7 @@ def auto_detect_bounds(df: pd.DataFrame,
     return bounds
 
 
-def get_bounds(df: pd.DataFrame = None, city: str = None) -> Dict:
+def get_bounds(df: Optional[pd.DataFrame] = None, city: Optional[str] = None) -> Dict:
     """
     Get geographic bounds - either from config or auto-detected.
 
@@ -209,8 +209,8 @@ SEVERITY_WEIGHTS = {
 def clean_coordinates(df: pd.DataFrame,
                       lat_col: str = 'latitude',
                       lon_col: str = 'longitude',
-                      bounds: Dict = None,
-                      city: str = None) -> Tuple[pd.DataFrame, int, Dict]:
+                      bounds: Optional[Dict] = None,
+                      city: Optional[str] = None) -> Tuple[pd.DataFrame, int, Dict]:
     """
     Validate and filter coordinates to geographic bounds.
 
@@ -417,8 +417,8 @@ def clean_timestamps(df: pd.DataFrame,
 
         # Add derived time features only if datetime column exists
         if output_col in df.columns:
-            df['hour_of_day'] = df[output_col].dt.hour.fillna(12).astype(int)
-            df['day_of_week'] = df[output_col].dt.dayofweek.fillna(0).astype(int)
+            df['hour_of_day'] = df[output_col].dt.hour.fillna(12).astype(int)  # type: ignore
+            df['day_of_week'] = df[output_col].dt.dayofweek.fillna(0).astype(int)  # type: ignore
 
     return df, parse_failures
 
@@ -590,7 +590,7 @@ class DataCleaner:
 
         # Keep only columns that exist
         keep_cols = [c for c in db_columns.keys() if c in df.columns]
-        df = df[keep_cols].copy()
+        df = df[keep_cols].copy()  # type: ignore
 
         return df, report
 

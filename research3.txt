@@ -4,36 +4,69 @@ Combining Augment Analysis + ChatGPT Architecture Recommendations
 ================================================================================
 
 ================================================================================
-IMPLEMENTATION STATUS SNAPSHOT (as of 2026-02-01)
+IMPLEMENTATION STATUS SNAPSHOT (as of 2026-02-02)
 ================================================================================
 
 This document is the **design source of truth**. Below is a quick status view
 of how much of it is already reflected in the current repo.
 
 - DATA LAYER
-  - Implemented: CSV-based NYPD cleaner (`backend/data_cleaner.py`) and
-    in-memory cache (`backend/data_init.py`).
-  - Implemented: PostgreSQL + PostGIS instance with NYPD crime data migrated
-    (manual setup; app still reads from CSV for now).
-  - Planned: Move schema into code (`schema.sql`, `migrate_data.py`,
-    `db_config.py`) and wire Flask to read from Postgres instead of CSV.
-  - Planned: Real amenities via Overpass, 311 complaints, lighting, transit.
+  ✅ Implemented: CSV-based NYPD cleaner (`backend/data_cleaner.py`) with:
+     - Auto-detection of geographic bounds (multi-city support)
+     - Crime type standardization and severity weights
+     - Crime category mapping for demographic weighting
+     - Demographic data cleaning (age, race, sex)
+     - Timestamp parsing with derived time features
+  ✅ Implemented: In-memory cache (`backend/data_init.py`) with K-Means zones
+  ✅ Implemented: PostgreSQL + PostGIS instance with NYPD crime data migrated
+     (manual setup; dual-mode code exists but `USE_DATABASE = False`)
+  ❌ Planned: Move schema into code (`schema.sql`, `migrate_data.py`,
+     `db_config.py`) and wire Flask to read from Postgres instead of CSV
+  ❌ Planned: Real amenities via Overpass API, 311 complaints, lighting, transit
 
 - ML LAYER
-  - Implemented: K-Means / DBSCAN / KDE clustering & density
-    (`backend/models.py`).
-  - Planned: Crime-type RiskVector, time-decay weighting, XGBoost,
-    confidence intervals, proper feature importance.
+  ✅ Implemented: K-Means (30 clusters) / DBSCAN (quadrant-based) / KDE density
+     (`backend/models.py`)
+  ✅ Implemented: Victim demographic zones (25 zones with concentration scores)
+  ✅ Implemented: Crime density classification (Low/Medium/High zones)
+  ✅ Implemented: Model evaluation module (`backend/model_evaluation.py`) with
+     silhouette, Davies-Bouldin, and Calinski-Harabasz metrics
+  ❌ Planned: Crime-type RiskVector separation, time-decay weighting, XGBoost,
+     confidence intervals, proper feature importance extraction
 
 - DEMOGRAPHIC PERSONALIZATION
-  - Implemented: Demographic impact weights and personalized text
-    recommendations (`backend/analysis.py`, `backend/demographic_parser.py`).
-  - Planned: Exposure multipliers, explicit `PersonalizedRisk` pipeline,
-    and new `/personalized-risk`, `/compare-places`, `/safe-times` endpoints.
+  ✅ Implemented: Demographic impact weights (`analysis.py`) with:
+     - DEFAULT_DEMOGRAPHIC_WEIGHTS for general/women/children/elderly
+     - apply_demographic_weighting() function
+     - Dual-mode support (database or in-memory)
+  ✅ Implemented: Demographic parser (`backend/demographic_parser.py`) with:
+     - Natural language parsing ("3 white women + 2 black men")
+     - Vulnerable group detection (children, elderly, women, LGBTQ+, etc.)
+     - Risk factor identification (racial bias, gender-based violence, etc.)
+     - Custom safety recommendations per group composition
+  ❌ Planned: Exposure multipliers, explicit `PersonalizedRisk` pipeline class,
+     and new `/personalized-risk`, `/compare-places`, `/safe-times` endpoints
+
+- API LAYER
+  ✅ Implemented: Flask app (`backend/app1.py`) with endpoints:
+     - `/api/analyze_v1` - Basic safety analysis
+     - `/api/analyze_v2` - Enhanced analysis with density classification
+     - `/api/chat` - Natural language interface with demographic parsing
+     - `/api/heatmap` - Crime heatmap data
+     - `/api/density_map` - Density grid data
+     - `/api/demographic_zones` - Demographic zone data
+     - `/api/dbscan_clusters` - DBSCAN cluster data
+     - `/api/map_data` - Combined map visualization data
+  ❌ Planned: `/personalized-risk`, `/compare-places`, `/safe-times` endpoints
+
+- UTILITIES
+  ✅ Implemented: Geocoding with multi-city support (`backend/geo_utils.py`)
+  ✅ Implemented: Safety report generation (`backend/utils.py`)
+  ✅ Implemented: Folium map visualization helpers
 
 - LLM + VISUALIZATION
-  - Planned: LLM explanation service and advanced Mapbox / uncertainty
-    visualization on the frontend.
+  ❌ Planned: LLM explanation service (OpenAI/Claude integration)
+  ❌ Planned: Advanced Mapbox / uncertainty visualization on frontend
 
 See **PART 4: IMPLEMENTATION PHASES** and **PART 7: CODE MAPPING** below for
 more detailed, per-task status.
@@ -274,48 +307,93 @@ PHASE 1: DATA FOUNDATION (Week 1-2)
 ────────────────────────────────────
 Priority: HIGH | Effort: MEDIUM
 
-Tasks (status as of 2026-02-01):
+Tasks (status as of 2026-02-02):
 [x] Set up PostgreSQL + PostGIS database
     - DB is running locally with PostGIS enabled.
 [x] Design schema for crimes, amenities, risk_scores
     - See TABLES 1–4 above.
 [x] Migrate existing NYPD CSV data to database
     - ~435k NYPD records loaded into Postgres.
-[ ] Implement Overpass API integration for real POI data
-[ ] Add 311 complaints data from NYC Open Data
 [x] Create data validation and cleaning pipeline
-    - Implemented in `backend/data_cleaner.py` and used by `backend/data_init.py`.
+    - Implemented in `backend/data_cleaner.py` (656 lines, production-ready)
+    - Auto-detection of geographic bounds (multi-city support)
+    - Crime type standardization, severity weights, demographic cleaning
+    - Timestamp parsing with derived time features
+[ ] Implement Overpass API integration for real POI data
+    - Currently using dummy amenity data (100 POIs across 5 NYC boroughs)
+[ ] Add 311 complaints data from NYC Open Data
+[ ] Create `db_config.py` with PostgreSQL connection pooling
+    - Dual-mode code exists in `analysis.py` but `USE_DATABASE = False`
+[ ] Create `schema.sql` with final table definitions
+[ ] Create `migrate_data.py` for automated database migration
 
 PHASE 2: ML MODEL UPGRADES (Week 3-4)
 ─────────────────────────────────────
 Priority: HIGH | Effort: HIGH
 
-Tasks:
-[ ] Separate crime analysis by type (create RiskVector)
+Tasks (status as of 2026-02-02):
+[x] Implement K-Means clustering (30 zones)
+    - Implemented in `backend/models.py`
+[x] Implement DBSCAN clustering with quadrant-based batching
+    - Memory-efficient processing of large datasets
+[x] Implement KDE crime density classification (Low/Medium/High)
+    - Grid-based density estimation with percentile thresholds
+[x] Implement victim demographic zones (25 zones)
+    - Concentration scores for age, race, sex
+[x] Create model evaluation module
+    - Silhouette, Davies-Bouldin, Calinski-Harabasz metrics
+    - Implemented in `backend/model_evaluation.py` (291 lines)
+[ ] Separate crime analysis by crime_category into RiskVector class
+    - Currently crime_types dict is returned, but not structured as RiskVector
 [ ] Add time-decay weighting to existing models
+    - Formula: 1.0x (<30 days), 0.7x (30-90 days), 0.4x (90+ days)
 [ ] Implement XGBoost classifier for crime type prediction
 [ ] Add confidence intervals to safety scores
+    - Currently no uncertainty quantification
 [ ] Create continuous risk surfaces (upgrade from hard clusters)
+    - Currently using discrete K-Means zones
 [ ] Implement feature importance extraction
+    - Placeholder values exist in demographic_feature_importance
 
 PHASE 3: DEMOGRAPHIC PERSONALIZATION ENGINE (Week 5-6)
 ──────────────────────────────────────────────────────
 Priority: HIGH | Effort: MEDIUM
 
-Tasks (status as of 2026-02-01):
+Tasks (status as of 2026-02-02):
 [x] Implement Demographic Impact Matrix (configurable weights)
-    - Implemented in code as DEFAULT_DEMOGRAPHIC_WEIGHTS in `backend/analysis.py`.
-      External JSON config file is still TODO.
+    - Implemented as DEFAULT_DEMOGRAPHIC_WEIGHTS in `backend/analysis.py`
+    - Supports: general, women, children, elderly
+    - Categories: sexual, harassment, assault, theft, robbery
+[x] Implement apply_demographic_weighting() function
+    - Adjusts safety scores based on crime composition and demographic group
+[x] Implement demographic parser for natural language input
+    - `backend/demographic_parser.py` (219 lines)
+    - Parses: "3 white women + 2 black men", "family with 2 children"
+    - Detects vulnerable groups: children, elderly, women, LGBTQ+, pregnant, disabled
+    - Identifies risk factors: racial_bias, gender_based_violence, hate_crimes
+[x] Generate custom safety recommendations per group
+    - generate_custom_safety_recommendations() with group-specific advice
+[x] Integrate demographic analysis into /api/chat endpoint
+    - Accepts optional `demographics` parameter
+    - Returns demographic_profile and custom recommendations
 [ ] Create Exposure Multiplier calculation
-[ ] Build PersonalizedRisk formula implementation
-[ ] Add user context input (group size, demographics, venue type)
+    - Planned: group size, venue type, time context multipliers
+[ ] Build PersonalizedRisk formula implementation as a class
+    - Currently implemented as functions, not a reusable class
+[ ] Add user context input (group size, demographics, venue type) to all endpoints
+    - Currently only /api/chat supports demographics
 [ ] Create /personalized-risk API endpoint
+    - Planned: POST with location, user_profile, context
 [ ] Create /compare-places API endpoint
+    - Planned: POST with multiple places, user_profile, time
 [ ] Create /safe-times API endpoint
+    - Planned: GET with location, user_profile, date
+[ ] Move DEFAULT_DEMOGRAPHIC_WEIGHTS to external JSON config file
+    - Currently hardcoded in analysis.py
 
 NOTE: The current backend already applies demographic-specific weighting and
-generates group-aware text recommendations, but the full Phase 3 API surface
-is not yet implemented.
+generates group-aware text recommendations via the /api/chat endpoint, but the
+full Phase 3 API surface (dedicated endpoints) is not yet implemented.
 
 PHASE 4: LLM INTEGRATION (Week 7-8)
 ───────────────────────────────────
@@ -393,51 +471,141 @@ in the repo right now, and highlights what is already done vs still TODO.
 
 BACKEND MODULES:
 
-1. data_cleaner.py + data_init.py
+1. **data_cleaner.py** (656 lines) - PRODUCTION READY ✅
    - DONE:
-     - Centralized CSV cleaning and validation pipeline.
-     - In-memory caching of cleaned DataFrame and derived objects.
+     - CleaningReport class with detailed step tracking
+     - Auto-detection of geographic bounds (works for ANY city)
+     - CITY_BOUNDS_CONFIG for NYC, London, Chicago (extensible)
+     - Crime type standardization with regex mappings
+     - Crime category mapping (sexual, harassment, assault, theft, robbery, property)
+     - SEVERITY_WEIGHTS (0.3-1.0 scale) for risk scoring
+     - Demographic cleaning (vic_age_group, vic_race, vic_sex)
+     - Timestamp parsing with hour_of_day and day_of_week derivation
+     - normalize_columns() for handling different CSV formats
+     - clean_for_database() method for schema-ready output
+     - CLI interface for standalone usage
    - TODO:
-     - Move schema + migration into code (`schema.sql`, `migrate_data.py`).
-     - PostgreSQL connection + loaders (`db_config.py`).
-     - Overpass API integration for real POIs.
-     - 311 complaints data loader.
+     - None (module is complete for current needs)
 
-2. models.py + analysis.py
+2. **data_init.py** (186 lines) - PRODUCTION READY ✅
    - DONE:
-     - K-Means / DBSCAN / KDE clustering and density zones.
-     - Basic safety scoring and crime breakdown for a location.
+     - Global cached_data dict with type hints (Dict[str, Any])
+     - prepare_data() - CSV loading with data_cleaner integration
+     - train_models() - K-Means, DBSCAN, demographic zones, density zones
+     - initialize_data() - Top-level initializer
+     - load_amenity_data() - Dummy amenity generator (100 POIs across 5 boroughs)
+     - Cleaning report storage for debugging
    - TODO:
-     - Separate analysis by crime_category into a full RiskVector.
-     - Time-decay weighting function.
-     - Confidence interval calculation for scores.
-     - XGBoost (or similar) model for feature importance / prediction.
+     - Replace dummy amenities with Overpass API integration
+     - Add 311 complaints data loader
 
-3. demographic_parser.py (future: personalization_engine.py)
+3. **models.py** (409 lines) - PRODUCTION READY ✅
    - DONE:
-     - Parsing natural-language group descriptions into a profile.
-     - Generating personalized text recommendations based on profile
-       and crime types.
+     - initialize_dbscan_clusters() - Quadrant-based batching for memory efficiency
+     - predict_dbscan_cluster() - Nearest-neighbor prediction
+     - initialize_victim_demographic_zones() - 25 zones with concentration scores
+     - predict_demographic_zone() - Zone prediction with optional demographics
+     - initialize_crime_density_zones() - KDE with Low/Medium/High classification
+     - get_crime_density_classification() - Per-point density + grid data
+     - Multi-city support via CITY_BOUNDS_CONFIG
+     - Configurable grid resolution (DENSITY_GRID_SIZE = 50)
    - TODO:
-     - DemographicImpactMatrix and ExposureMultiplier as reusable
-       classes/utilities.
-     - PersonalizedRiskCalculator and PlaceComparator helpers used by
-       future endpoints.
+     - Separate analysis by crime_category into a full RiskVector class
+     - Time-decay weighting function (1.0x <30d, 0.7x 30-90d, 0.4x 90+d)
+     - Confidence interval calculation for scores
+     - XGBoost model for feature importance / prediction
 
-4. (future) llm_service.py
+4. **analysis.py** (272 lines) - PRODUCTION READY ✅
+   - DONE:
+     - Dual-mode operation (DB_AVAILABLE flag, USE_DATABASE toggle)
+     - DEFAULT_DEMOGRAPHIC_WEIGHTS for general/women/children/elderly
+     - get_demographic_weights() - Database or fallback to defaults
+     - apply_demographic_weighting() - Core personalization logic
+     - analyze_safety() - Main analysis function with demographic_group parameter
+     - analyze_amenities() - Nearby amenity analysis
+     - Time-of-day analysis (morning/afternoon/evening/night)
+     - DBSCAN cluster info integration
+     - Demographic zone info integration
+     - Crime density classification integration
    - TODO:
-     - OpenAI/Claude integration.
-     - Prompt templates for explanations.
-     - Explanation caching.
+     - Exposure multipliers (group size, venue type, time context)
+     - PersonalizedRiskCalculator class
+     - PlaceComparator helper for /compare-places endpoint
 
-5. app1.py (Flask routes)
-   - CURRENT:
-     - Existing safety-score style endpoint(s) backed by CSV pipeline.
+5. **demographic_parser.py** (219 lines) - PRODUCTION READY ✅
+   - DONE:
+     - parse_demographic_group() - Natural language parsing
+     - Supports patterns: "3 white women + 2 black men", "family with 2 children"
+     - Vulnerable group detection (children, elderly, women, LGBTQ+, pregnant, disabled)
+     - Risk factor identification (racial_bias, gender_based_violence, hate_crimes, etc.)
+     - generate_custom_safety_recommendations() - Group-specific safety advice
+     - Race-based safety considerations
+     - Solo vs large group recommendations
    - TODO:
-     - /personalized-risk endpoint.
-     - /compare-places endpoint.
-     - /safe-times endpoint.
-     - Extend responses to include confidence and richer breakdowns.
+     - Refactor into PersonalizationEngine class
+     - Add ExposureMultiplier calculation
+
+6. **app1.py** (301 lines) - PRODUCTION READY ✅
+   - DONE:
+     - Flask app with CORS configuration
+     - `/api/analyze_v1` - Basic safety analysis with optional advanced features
+     - `/api/analyze_v2` - Enhanced analysis with density classification
+     - `/api/chat` - Natural language interface with demographic parsing
+     - `/api/heatmap` - Crime heatmap data (5000 sample points)
+     - `/api/density_map` - Density grid data
+     - `/api/demographic_zones` - Demographic zone data
+     - `/api/dbscan_clusters` - DBSCAN cluster data
+     - `/api/map_data` - Combined map visualization data
+     - `ensure_data_initialized()` helper
+   - TODO:
+     - `/personalized-risk` endpoint (POST with user_profile + context)
+     - `/compare-places` endpoint (POST with multiple places)
+     - `/safe-times` endpoint (GET with location + user_profile)
+     - Add confidence scores to all responses
+
+7. **geo_utils.py** (191 lines) - PRODUCTION READY ✅
+   - DONE:
+     - CITY_NAME_MAPPINGS for NYC, London, Chicago (extensible)
+     - detect_city_from_address() - Extract city from geocoded address
+     - detect_city_from_coordinates() - Reverse geocoding
+     - get_coordinates_with_city() - Geocode + city detection
+     - get_coordinates() - Backward-compatible geocoding
+     - haversine() - Distance calculation
+     - find_nearby_points() - Bounding box + precise distance filtering
+   - TODO:
+     - None (module is complete for current needs)
+
+8. **utils.py** (249 lines) - PRODUCTION READY ✅
+   - DONE:
+     - create_safety_map() - Folium map with markers, clusters, heatmap
+     - get_demographic_context() - Amenity-type-specific context
+     - generate_safety_report() - Detailed text report with demographic analysis
+     - Demographic-specific recommendations (children, elderly, nightlife)
+   - TODO:
+     - None (module is complete for current needs)
+
+9. **model_evaluation.py** (291 lines) - PRODUCTION READY ✅
+   - DONE:
+     - evaluate_clustering_quality() - Silhouette, Davies-Bouldin, Calinski-Harabasz
+     - evaluate_prediction_accuracy() - Zone prediction and safety score consistency
+     - generate_evaluation_report() - Comprehensive model assessment
+   - TODO:
+     - None (module is complete for current needs)
+
+10. **(future) llm_service.py** - NOT STARTED ❌
+    - TODO:
+      - OpenAI/Claude API integration
+      - Prompt templates for safety explanations
+      - Explanation caching (Redis or in-memory)
+      - Context-aware recommendation generation
+
+11. **(future) db_config.py** - NOT STARTED ❌
+    - TODO:
+      - PostgreSQL connection pooling
+      - get_nearby_crimes() - Spatial query with ST_DWithin
+      - calculate_risk_score() - Database-backed risk calculation
+      - get_demographic_weights() - Load from demographic_impact_weights table
+      - insert_crime_incident() - Batch insertion helper
 
 FRONTEND FILES TO MODIFY:
 
