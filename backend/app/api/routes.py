@@ -1,4 +1,6 @@
-from flask import Blueprint, request, jsonify
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from typing import Optional, Dict, List, Any
 from app.core.state import cached_data
 from app.utils.geo import get_coordinates
 from app.services.data_loader import initialize_data
@@ -8,17 +10,28 @@ from app.utils.report import generate_safety_report
 from app.services.demographics import parse_demographic_group, generate_custom_safety_recommendations
 import polars as pl
 
-api_bp = Blueprint('api', __name__, url_prefix='/api')
+router = APIRouter(prefix="/api")
 
+# --------------------------
+# Pydantic Models
+# --------------------------
+class AnalyzeRequest(BaseModel):
+    location: str
+    include_advanced: bool = False
+    include_amenities: bool = False
+
+class ChatRequest(BaseModel):
+    message: str
+    demographics: Optional[str] = None
+
+# --------------------------
+# Helper Functions
+# --------------------------
 def ensure_data_initialized():
     """Ensure crime data and models are loaded into the global cache."""
     if cached_data.get('df') is None:
         initialize_data()
 
-
-# --------------------------
-# Helper Functions (Moved to analysis.py in production)
-# --------------------------
 def get_crime_heatmap():
     ensure_data_initialized()
     df = cached_data.get('df')
@@ -26,29 +39,14 @@ def get_crime_heatmap():
         return []
     
     sample_size = min(5000, df.height)
-    # Polars sample
     heatmap_data = df.sample(sample_size, seed=42).select(['latitude', 'longitude', 'crime_type'])
 
-    # Use severity_weight column if available, otherwise fall back to cached severity dict
-    if 'severity_weight' in heatmap_data.columns:
-        # Already have weight
-        # Just select it
-        # Note: df.sample above didn't select 'severity_weight'. 
-        # Re-select
-        heatmap_data = df.sample(sample_size, seed=42).select(['latitude', 'longitude', 'crime_type', 'severity_weight'])
-        
-        # Rename severity_weight to weight for frontend
-        heatmap_data = heatmap_data.rename({'severity_weight': 'weight'})
+    if 'severity_weight' in cached_data.get('df', pl.DataFrame()).columns: # Check original df columns safe way
+        # Re-sample to include weight if it exists
+         heatmap_data = df.sample(sample_size, seed=42).select(['latitude', 'longitude', 'crime_type', 'severity_weight'])
+         heatmap_data = heatmap_data.rename({'severity_weight': 'weight'})
     else:
         crime_severity = cached_data.get('crime_severity', {})
-        # Polars map/replace is tricky for dict lookup if not efficient.
-        # But for 5000 rows it's instant.
-        
-        # Create mapping expression
-        # pl.col('crime_type').replace(crime_severity, default=3)
-        # Note: replace with dict is available in recent polars
-        
-        # Or map_elements
         def get_weight(ctype):
             return crime_severity.get(ctype, 3) / 10.0
             
@@ -57,7 +55,6 @@ def get_crime_heatmap():
         )
         
     return heatmap_data.select(['latitude', 'longitude', 'weight']).to_dicts()
-
 
 def get_demographic_analysis_data():
     ensure_data_initialized()
@@ -77,7 +74,6 @@ def get_demographic_analysis_data():
         })
 
     return {'feature_importance': feature_importance, 'zones': zone_data}
-
 
 def get_crime_density_map_data():
     ensure_data_initialized()
@@ -104,7 +100,6 @@ def get_crime_density_map_data():
         }
     }
 
-
 def get_dbscan_clusters_data():
     ensure_data_initialized()
     dbscan_data = cached_data.get('dbscan_clusters')
@@ -112,14 +107,13 @@ def get_dbscan_clusters_data():
         return []
     return [
         {
-            "id": cluster_id,  # cluster_id is the dict key, not a field
+            "id": cluster_id,
             "lat": cluster['center_lat'],
             "lon": cluster['center_lon'],
             "crime_count": cluster['crime_count']
         }
         for cluster_id, cluster in dbscan_data['dominant_crimes'].items()
     ]
-
 
 def get_demographic_zones_data():
     ensure_data_initialized()
@@ -140,17 +134,17 @@ def get_demographic_zones_data():
 # --------------------------
 # API Endpoints
 # --------------------------
-@api_bp.route('/analyze_v1', methods=['POST'])
-def analyze_endpoint_v1():
-    data = request.get_json()
-    location = data.get('location', '')
-    include_advanced = data.get('include_advanced', False)
+
+@router.post('/analyze_v1')
+def analyze_endpoint_v1(request: AnalyzeRequest):
+    location = request.location
+    include_advanced = request.include_advanced
     
     if coords := get_coordinates(location):
         lat, lon = coords
         analysis = analyze_safety(lat, lon)
         
-        if data.get('include_amenities', False):
+        if request.include_amenities:
             analysis['amenities'] = analyze_amenities(lat, lon)
             
         if include_advanced:
@@ -158,30 +152,27 @@ def analyze_endpoint_v1():
             if 'error' not in demographic_data:
                 analysis['demographic_analysis'] = demographic_data
                 
-        return jsonify(analysis)
+        return analysis
     
-    return jsonify({"error": "Invalid location"}), 400
+    raise HTTPException(status_code=400, detail="Invalid location")
 
-@api_bp.route('/heatmap', methods=['GET'])
+@router.get('/heatmap')
 def heatmap_endpoint():
-    heatmap_data = get_crime_heatmap()
-    return jsonify(heatmap_data)
+    return get_crime_heatmap()
 
-@api_bp.route('/density_map', methods=['GET'])
+@router.get('/density_map')
 def density_map_endpoint():
-    density_data = get_crime_density_map_data()
-    return jsonify(density_data)
+    return get_crime_density_map_data()
 
-@api_bp.route('/demographic_zones', methods=['GET'])
+@router.get('/demographic_zones')
 def demographic_zones_endpoint():
-    demographic_data = get_demographic_analysis_data()
-    return jsonify(demographic_data)
+    return get_demographic_analysis_data()
 
-@api_bp.route('/dbscan_clusters', methods=['GET'])
+@router.get('/dbscan_clusters')
 def dbscan_clusters_endpoint():
     dbscan_data = cached_data.get('dbscan_clusters')
     if not dbscan_data:
-        return jsonify({"error": "DBSCAN clustering data not available"}), 404
+         raise HTTPException(status_code=404, detail="DBSCAN clustering data not available")
     
     clusters = []
     for cluster_id, info in dbscan_data['dominant_crimes'].items():
@@ -194,20 +185,17 @@ def dbscan_clusters_endpoint():
             'common_crimes': {str(k): int(v) for k, v in info['common_crimes'].items()}
         })
     
-    return jsonify({'clusters': clusters})
+    return {'clusters': clusters}
 
-@api_bp.route('/analyze_v2', methods=['POST'])
-def analyze_endpoint_v2():
-    data = request.get_json()
-    location = data.get('location', '')
+@router.post('/analyze_v2')
+def analyze_endpoint_v2(request: AnalyzeRequest):
+    location = request.location
     
     if coords := get_coordinates(location):
         lat, lon = coords
-        # analysis = analyze_safety(lat, lon) # Using imported function which handles data init
         analysis = analyze_safety(lat, lon)
         amenities = analyze_amenities(lat, lon)
         
-        # Add coordinates and raw crime data to response
         response_data = {
             **analysis,
             "lat": lat,
@@ -217,47 +205,37 @@ def analyze_endpoint_v2():
             "density": get_crime_density_classification(lat, lon)
         }
         
-        return jsonify(response_data)
+        return response_data
     
-    return jsonify({"error": "Invalid location"}), 400
+    raise HTTPException(status_code=400, detail="Invalid location")
 
-@api_bp.route('/map_data', methods=['GET'])
+@router.get('/map_data')
 def map_data_endpoint():
-    return jsonify({
+    return {
         "dbscan_clusters": get_dbscan_clusters_data(),
         "demographic_zones": get_demographic_zones_data(),
         "density_zones": get_crime_density_map_data()
-    })
+    }
 
-
-@api_bp.route('/chat', methods=['POST'])
-def chat_endpoint():
+@router.post('/chat')
+def chat_endpoint(request: ChatRequest):
     try:
-        data = request.get_json()
-        print("DATA")
-        print(data)
-        location = data.get('message', '')
-        print(location)
-        demographics = data.get('demographics', '')  # Optional custom demographics
-        print(demographics)
+        location = request.message
+        demographics = request.demographics
         
         if not location:
-            return jsonify({"error": "Empty request"}), 400
+            raise HTTPException(status_code=400, detail="Empty request")
 
-        # Extract amenity type from location string (before first comma)
         amenity_type = None
         if ',' in location:
             amenity_type = location.split(',')[0].strip()
 
-        # Parse custom demographics if provided
         demographic_profile = None
         if demographics:
             demographic_profile = parse_demographic_group(demographics)
 
-        # Try geocoding the full string first
         coords = get_coordinates(location)
         
-        # If full string fails and we have a comma (potential <amenity>, <address> format)
         if not coords and ',' in location:
             parts = location.split(',', 1)
             if len(parts) > 1:
@@ -270,10 +248,8 @@ def chat_endpoint():
             analysis = analyze_safety(lat, lon)
             amenities = analyze_amenities(lat, lon)
             
-            # Generate base report
             base_report = generate_safety_report(analysis, location, amenity_type)
 
-            # Add custom demographic analysis if provided
             if demographic_profile:
                 custom_recommendations = generate_custom_safety_recommendations(
                     demographic_profile,
@@ -284,7 +260,7 @@ def chat_endpoint():
             else:
                 full_report = base_report
 
-            return jsonify({
+            return {
                 "text": full_report,
                 "lat": lat,
                 "lon": lon,
@@ -301,12 +277,14 @@ def chat_endpoint():
                         }]
                     }
                 }
-            })
+            }
             
-        return jsonify({"error": "Invalid location"}), 400
+        raise HTTPException(status_code=400, detail="Invalid location")
         
-    except Exception as e:  # REQUIRED EXCEPT CLAUSE
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         print(f"Server Error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "Internal server error"}), 500
+        raise HTTPException(status_code=500, detail="Internal server error")

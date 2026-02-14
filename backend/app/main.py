@@ -1,38 +1,47 @@
-from flask import Flask
-from flask_cors import CORS
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from app.services.data_loader import initialize_data
-from app.api.routes import api_bp
+from app.api.routes import router as api_router
 
-def create_app():
-    app = Flask(__name__)
-    
-    # Configure CORS
-    CORS(app, resources={
-        r"/*": {
-            "origins": [
-                "http://localhost",
-                "http://localhost:80",
-                "http://127.0.0.1",
-                "http://127.0.0.1:80",
-                "http://localhost:3000",
-                "http://localhost:5000"
-            ],
-            "methods": ["GET", "POST", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
-        }
-    })
-    
-    # Register Blueprints
-    app.register_blueprint(api_bp)
-    
-    @app.route('/')
-    def health_check():
-        return "Safety Analysis Service Running"
-        
-    return app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load data on startup
+    initialize_data()
+    yield
+    # Clean up (if any) on shutdown
 
-app = create_app()
+app = FastAPI(
+    title="Safety Analysis API",
+    lifespan=lifespan
+)
+
+# Configure CORS
+origins = [
+    "http://localhost",
+    "http://localhost:80",
+    "http://127.0.0.1",
+    "http://127.0.0.1:80",
+    "http://localhost:3000",
+    "http://localhost:5000",
+    "*" # Helpful for dev, restrict in prod if needed
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include API router
+app.include_router(api_router)
+
+@app.get("/")
+def health_check():
+    return {"status": "Safety Analysis Service Running"}
 
 if __name__ == '__main__':
-    initialize_data()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import uvicorn
+    uvicorn.run("app.main:app", host='0.0.0.0', port=5000, reload=True)
