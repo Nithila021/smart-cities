@@ -1,5 +1,5 @@
 import numpy as np
-import pandas as pd
+import polars as pl
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import os
@@ -13,15 +13,12 @@ from app.core.state import cached_data
 # DATA LOADING AND TRAINING
 # =============================================================================
 
-def prepare_data() -> pd.DataFrame:
+def prepare_data() -> pl.DataFrame:
     """Load and preprocess raw NYPD crime data using the data_cleaner module.
 
     This function is responsible only for I/O and cleaning and returns a
-    cleaned DataFrame. Model training and caching are handled separately
+    cleaned Polars DataFrame. Model training and caching are handled separately
     in train_models().
-
-    Uses data_cleaner.py for all cleaning operations to ensure consistency
-    between CSV loading and database migration.
     """
     # Find available data file
     csv_files = [
@@ -52,20 +49,25 @@ def prepare_data() -> pd.DataFrame:
     return df
 
 
-def train_models(df: pd.DataFrame) -> None:
+def train_models(df: pl.DataFrame) -> None:
     """Train clustering / density models and populate the global cache.
 
-    Receives a cleaned DataFrame and is responsible for fitting models and
+    Receives a cleaned Polars DataFrame and is responsible for fitting models and
     updating cached_data. This keeps training concerns separated from
     data loading/cleaning.
     """
     # Create crime clusters - simplified to use only coordinates for easier prediction
-    coords = df[['latitude', 'longitude']].values
+    # Convert to numpy for sklearn
+    coords = df.select(['latitude', 'longitude']).to_numpy()
+    
     crime_scaler = StandardScaler()
     coords_scaled = crime_scaler.fit_transform(coords)
 
     crime_kmeans = KMeans(n_clusters=30, random_state=42, n_init=10)
-    df['crime_zone'] = crime_kmeans.fit_predict(coords_scaled)
+    crime_labels = crime_kmeans.fit_predict(coords_scaled)
+    
+    # Add labels back to DataFrame
+    df = df.with_columns(pl.Series(name="crime_zone", values=crime_labels))
 
     # Create safety scores using SEVERITY_WEIGHTS from data_cleaner (0-1 scale)
     # Convert to 1-10 scale for backward compatibility with existing formula
@@ -73,22 +75,51 @@ def train_models(df: pd.DataFrame) -> None:
 
     zone_safety = {}
     zone_dominant_crimes = {}
-
-    for zone in df['crime_zone'].unique():
-        zone_df = df[df['crime_zone'] == zone]
-        total_crimes = len(zone_df)
-        severity_score = sum(
-            (crime_severity.get(crime, 3) * count)
-            for crime, count in zone_df['crime_type'].value_counts().items()
-        )
-        safety_score = 100 - ((severity_score / (total_crimes * 10)) * 100)
+    
+    # Aggregations in Polars
+    # We want per-zone:
+    # 1. Total crimes
+    # 2. Weighted severity sum
+    # 3. Crime type counts (for dominant/common)
+    
+    # It's often easier to iterate through unique zones if N is small (30 is small)
+    # But let's use Polars aggregation power where possible or hybrid
+    
+    # Group by zone and aggregated stats
+    unique_zones = df['crime_zone'].unique().to_list()
+    
+    for zone in unique_zones:
+        zone_df = df.filter(pl.col('crime_zone') == zone)
+        total_crimes = zone_df.height
+        
+        # Calculate severity score
+        # Join with weights or apply map
+        # Since we have 'severity_weight' column in the cleaned DF (0.0-1.0), we can just sum it * 10
+        # Check if severity_weight exists
+        if 'severity_weight' in zone_df.columns:
+             severity_score_sum = zone_df['severity_weight'].sum() * 10
+        else:
+             # Fallback if column missing (shouldn't happen with updated cleaner)
+             severity_score_sum = total_crimes * 5 # average
+             
+        safety_score = 100 - ((severity_score_sum / (total_crimes * 10)) * 100)
         zone_safety[zone] = max(0, min(100, safety_score))
 
-        # Get dominant crimes for each zone
-        crime_counts = zone_df['crime_type'].value_counts()
+        # Get dominant crimes
+        crime_counts = zone_df['crime_type'].value_counts().sort('count', descending=True)
+        
+        dominant = "Unknown"
+        common = {}
+        
+        if crime_counts.height > 0:
+            dominant = crime_counts[0, 'crime_type']
+            # Top 3
+            top3 = crime_counts.head(3)
+            common = {row['crime_type']: row['count'] for row in top3.iter_rows(named=True)}
+            
         zone_dominant_crimes[zone] = {
-            'dominant_crime': crime_counts.idxmax() if not crime_counts.empty else "Unknown",
-            'common_crimes': crime_counts.nlargest(3).to_dict()
+            'dominant_crime': dominant,
+            'common_crimes': common
         }
 
     # Update cached data
@@ -114,19 +145,15 @@ def train_models(df: pd.DataFrame) -> None:
     initialize_crime_density_zones(df)
 
 
-def initialize_data() -> pd.DataFrame:
-    """Top-level initializer that loads data and trains models.
-
-    This preserves the existing public API while delegating to
-    prepare_data() and train_models() for better structure.
-    """
-    print("Initializing data with enhanced cleaning...")
+def initialize_data() -> pl.DataFrame:
+    """Top-level initializer that loads data and trains models."""
+    print("Initializing data with enhanced cleaning (Polars)...")
     df = prepare_data()
     train_models(df)
-    print(f"Data initialization complete. {len(df)} records processed.")
+    print(f"Data initialization complete. {df.height} records processed.")
     return df
 
-def load_amenity_data() -> pd.DataFrame:
+def load_amenity_data() -> pl.DataFrame:
     """Load amenity data if available"""
     if cached_data.get('amenities_df') is not None:
         return cached_data['amenities_df']
@@ -164,11 +191,11 @@ def load_amenity_data() -> pd.DataFrame:
                     'longitude': lon + lon_offset
                 })
         
-        amenities_df = pd.DataFrame(amenities)
+        amenities_df = pl.DataFrame(amenities)
         
     else:
         # Load actual amenity data
-        amenities_df = pd.read_csv('NYC_Amenities.csv')
+        amenities_df = pl.read_csv('NYC_Amenities.csv')
     
     # Store in cache
     cached_data['amenities_df'] = amenities_df

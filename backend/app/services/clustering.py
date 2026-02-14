@@ -1,5 +1,5 @@
 import numpy as np
-import pandas as pd
+import polars as pl
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.neighbors import KernelDensity
@@ -32,16 +32,16 @@ NYC_AREA_SQKM = 783.8
 # Grid resolution for density calculations
 DENSITY_GRID_SIZE = 50
 
-def initialize_dbscan_clusters(df):
+def initialize_dbscan_clusters(df: pl.DataFrame):
     """
     Create DBSCAN clustering with batching for memory efficiency
     """
     print("Initializing DBSCAN clusters with batching...")
     
     # Larger sample but still manageable
-    sample_size = min(20000, len(df))
+    sample_size = min(20000, df.height)
     print(f"Sampling {sample_size} records for DBSCAN clustering...")
-    df_sample = df.sample(sample_size, random_state=42) if len(df) > sample_size else df.copy()
+    df_sample = df.sample(sample_size, seed=42) if df.height > sample_size else df.clone()
     
     # Split into geographical batches for processing
     # Use configured city bounds
@@ -53,24 +53,28 @@ def initialize_dbscan_clusters(df):
     lat_mid = (lat_min + lat_max) / 2
     lon_mid = (lon_min + lon_max) / 2
     
+    # Polars filtering
     quadrants = {
-        'NE': df_sample[(df_sample['latitude'] >= lat_mid) & (df_sample['longitude'] >= lon_mid)].copy(),
-        'NW': df_sample[(df_sample['latitude'] >= lat_mid) & (df_sample['longitude'] < lon_mid)].copy(),
-        'SE': df_sample[(df_sample['latitude'] < lat_mid) & (df_sample['longitude'] >= lon_mid)].copy(),
-        'SW': df_sample[(df_sample['latitude'] < lat_mid) & (df_sample['longitude'] < lon_mid)].copy()
+        'NE': df_sample.filter((pl.col('latitude') >= lat_mid) & (pl.col('longitude') >= lon_mid)),
+        'NW': df_sample.filter((pl.col('latitude') >= lat_mid) & (pl.col('longitude') < lon_mid)),
+        'SE': df_sample.filter((pl.col('latitude') < lat_mid) & (pl.col('longitude') >= lon_mid)),
+        'SW': df_sample.filter((pl.col('latitude') < lat_mid) & (pl.col('longitude') < lon_mid))
     }
     
     # Process each quadrant separately
     all_clusters = {}
     cluster_offset = 0
     
+    # We will collect result DataFrames
+    result_dfs = []
+    
     for quadrant_name, quadrant_df in quadrants.items():
-        print(f"Processing {quadrant_name} quadrant with {len(quadrant_df)} points...")
-        if len(quadrant_df) < 50:  # Skip if too few points
+        print(f"Processing {quadrant_name} quadrant with {quadrant_df.height} points...")
+        if quadrant_df.height < 50:  # Skip if too few points
             continue
             
         # Extract coordinates for clustering
-        coords = quadrant_df[['latitude', 'longitude']].values
+        coords = quadrant_df.select(['latitude', 'longitude']).to_numpy()
         
         # Scale coordinates within this quadrant
         coord_scaler = StandardScaler()
@@ -78,46 +82,79 @@ def initialize_dbscan_clusters(df):
         
         # Use more granular parameters but still reasonable
         dbscan = DBSCAN(eps=0.01, min_samples=5, algorithm='ball_tree', n_jobs=-1)
-        quadrant_df.loc[:, 'temp_cluster'] = dbscan.fit_predict(coords_scaled)
+        # Fit predict returns numpy array
+        temp_clusters = dbscan.fit_predict(coords_scaled)
+        
+        # Add to DataFrame
+        quadrant_df = quadrant_df.with_columns(pl.Series(name='temp_cluster', values=temp_clusters))
         
         # Renumber clusters to avoid overlap and store profiles
-        valid_clusters = [c for c in quadrant_df['temp_cluster'].unique() if c != -1]
+        # Filter valid ones
+        valid_clusters = [c for c in np.unique(temp_clusters) if c != -1]
         
-        # Initialize all as outliers first
-        quadrant_df['dbscan_cluster'] = -1
-        mask = quadrant_df['temp_cluster'] != -1
-        quadrant_df.loc[mask, 'dbscan_cluster'] = quadrant_df.loc[mask, 'temp_cluster'] + cluster_offset
-
+        # Initialize dbscan_cluster with -1
+        quadrant_df = quadrant_df.with_columns([
+            pl.when(pl.col('temp_cluster') != -1)
+            .then(pl.col('temp_cluster') + cluster_offset)
+            .otherwise(pl.lit(-1))
+            .alias('dbscan_cluster')
+        ])
+        
+        # Analyze clusters
+        # Group by 'temp_cluster' for efficiency
+        grouped = quadrant_df.filter(pl.col('temp_cluster') != -1).group_by('temp_cluster')
+        
+        # We can analyze aggregation
+        # But we need specific crime counts per cluster
+        # Let's iterate valid clusters for now to build `all_clusters` dict structure expected by API
+        
         for cluster in valid_clusters:
             global_id = cluster + cluster_offset
-            cluster_df = quadrant_df[quadrant_df['temp_cluster'] == cluster]
-            crime_counts = cluster_df['crime_type'].value_counts()
+            cluster_df = quadrant_df.filter(pl.col('temp_cluster') == cluster)
+            
+            # Crime counts
+            crime_counts = cluster_df['crime_type'].value_counts().sort('count', descending=True)
+            
+            dominant = "Unknown"
+            common = {}
+            if crime_counts.height > 0:
+                dominant = crime_counts[0, 'crime_type']
+                top5 = crime_counts.head(5)
+                common = {row['crime_type']: row['count'] for row in top5.iter_rows(named=True)}
             
             all_clusters[global_id] = {
-                'dominant_crime': crime_counts.idxmax() if not crime_counts.empty else "Unknown",
-                'common_crimes': crime_counts.nlargest(5).to_dict(),
+                'dominant_crime': dominant,
+                'common_crimes': common,
                 'center_lat': cluster_df['latitude'].mean(),
                 'center_lon': cluster_df['longitude'].mean(),
-                'crime_count': len(cluster_df),
+                'crime_count': cluster_df.height,
                 'quadrant': quadrant_name
             }
+        
+        # Add to results
+        result_dfs.append(quadrant_df.select(['latitude', 'longitude', 'dbscan_cluster', 'crime_type']))
         
         # Update offset for next quadrant
         if valid_clusters:
             cluster_offset = max(all_clusters.keys()) + 1
     
-    # Concatenate results efficiently
-    result_df = pd.concat([
-        q_df[['latitude', 'longitude', 'dbscan_cluster', 'crime_type']] 
-        for q_df in quadrants.values() if 'dbscan_cluster' in q_df.columns
-    ])
+    # Concatenate results
+    if result_dfs:
+        result_df = pl.concat(result_dfs)
+    else:
+        # Empty schema
+        result_df = pl.DataFrame(schema={
+            'latitude': pl.Float64, 
+            'longitude': pl.Float64, 
+            'dbscan_cluster': pl.Int64,
+            'crime_type': pl.Utf8
+        })
     
     # Store model components for future predictions
-    if result_df.empty:
-        # Create an empty DataFrame with the correct columns if no results were found
-        sample_points = pd.DataFrame(columns=['latitude', 'longitude', 'dbscan_cluster'])
+    if result_df.height == 0:
+        sample_points = pl.DataFrame(schema={'latitude': pl.Float64, 'longitude': pl.Float64, 'dbscan_cluster': pl.Int64})
     else:
-        sample_points = result_df[['latitude', 'longitude', 'dbscan_cluster']].copy()
+        sample_points = result_df.select(['latitude', 'longitude', 'dbscan_cluster'])
     
     dbscan_data = {
         'dominant_crimes': all_clusters,
@@ -136,17 +173,39 @@ def predict_dbscan_cluster(lat, lon):
     
     # Find nearest sample point
     sample_points = dbscan_data['sample_points']
-    sample_points['temp_dist'] = sample_points.apply(
-        lambda x: haversine(lat, lon, x['latitude'], x['longitude']), axis=1)
     
-    # Get nearest point's cluster
-    nearest = sample_points.loc[sample_points['temp_dist'].idxmin()]
-    return nearest['dbscan_cluster']
+    # Calculate distance for all points
+    # Polars expression for Haversine approximation or just Euclidean if local
+    # But let's use the python function appyl vectorised if possible, or mapping
+    
+    # If sample_points is huge, this is slow. 
+    # But keeping it similar to original implementation for now.
+    
+    # Creating a literal Lat/Lon to calculate distance against
+    # Use map_elements for custom haversine function
+    
+    # Optimization: pre-filter? No, global search.
+    
+    dist_series = sample_points.map_rows(
+        lambda row: haversine(lat, lon, row[0], row[1])
+    ).to_series()
+    
+    # Add dist column
+    # sample_points is likely large, creating a full distance column every request is expensive!
+    # Original code was: sample_points.apply(...)
+    
+    # Optimization: Use KDTree if available? Or just simplistic
+    # For now, replicate logic
+    
+    min_idx = dist_series.arg_min()
+    if min_idx is None:
+        return None
+        
+    return sample_points[min_idx, 'dbscan_cluster']
 
-def initialize_victim_demographic_zones(df):
+def initialize_victim_demographic_zones(df: pl.DataFrame):
     """
     Create victim-demographic zones by clustering areas where victims share common characteristics
-    Also analyze feature importance for demographic factors
     """
     print("Initializing victim demographic zones...")
     
@@ -160,58 +219,70 @@ def initialize_victim_demographic_zones(df):
         cached_data['demographic_feature_importance'] = None
         return
     
-    # Sample data if needed - slightly larger sample
-    sample_size = min(150000, len(df))
-    df_sample = df.sample(sample_size, random_state=42) if len(df) > sample_size else df
+    # Sample data if needed
+    sample_size = min(150000, df.height)
+    df_sample = df.sample(sample_size, seed=42) if df.height > sample_size else df
     
-    # Filter rows with demographic information
-    demo_df = df_sample.dropna(subset=available_cols)
-    if len(demo_df) < 1000:  # Not enough data for meaningful analysis
+    # Filter rows with demographic information (drop nulls)
+    demo_df = df_sample.drop_nulls(subset=available_cols)
+    if demo_df.height < 1000:
         print("Insufficient demographic data for clustering.")
         cached_data['victim_demographic_zones'] = None
         cached_data['demographic_feature_importance'] = None
         return
     
     # One-hot encode demographic features
+    # Scikit-Learn OneHotEncoder expects 2D array
+    demo_data_np = demo_df.select(available_cols).to_numpy()
+    
     demo_encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    demo_encoded = demo_encoder.fit_transform(demo_df[available_cols])
+    demo_encoded = demo_encoder.fit_transform(demo_data_np)
     
     # Add coordinates for spatial clustering
-    coords = demo_df[['latitude', 'longitude']].values
+    coords = demo_df.select(['latitude', 'longitude']).to_numpy()
     
-    # Combine location and demographics with proper scaling
-    # Scale coordinate features to have similar impact as demographic features
+    # Scale coordinates
     coord_scaler = StandardScaler()
     coords_scaled = coord_scaler.fit_transform(coords)
     
     # Combined features with higher weight on demographics (3x)
     combined_features = np.hstack([coords_scaled * 0.7, demo_encoded * 3])
     
-    # Use k-means for demographic zones with more clusters (25 instead of 15)
+    # Use k-means
     print(f"Clustering into 25 demographic zones...")
     kmeans = KMeans(n_clusters=25, random_state=42, n_init=10)
-    demo_df['demographic_zone'] = kmeans.fit_predict(combined_features)
+    zone_labels = kmeans.fit_predict(combined_features)
+    
+    demo_df = demo_df.with_columns(pl.Series(name='demographic_zone', values=zone_labels))
     
     # Analyze demographic zones
     zone_profiles = {}
-    for zone in demo_df['demographic_zone'].unique():
-        zone_data = demo_df[demo_df['demographic_zone'] == zone]
+    
+    # Iterating unique zones
+    unique_zones = np.unique(zone_labels)
+    
+    for zone in unique_zones:
+        zone_data = demo_df.filter(pl.col('demographic_zone') == zone)
         
-        # Get demographic breakdown for this zone
-        profile = {col: zone_data[col].value_counts().to_dict() for col in available_cols}
-        
-        # Get geographical center
+        profile = {}
+        # Demographic breakdown
+        for col in available_cols:
+             val_counts = zone_data[col].value_counts()
+             profile[col] = {row[col]: row['count'] for row in val_counts.iter_rows(named=True)}
+             
+        # Geographical center
         profile['center_lat'] = zone_data['latitude'].mean()
         profile['center_lon'] = zone_data['longitude'].mean()
-        profile['crime_count'] = len(zone_data)
+        profile['crime_count'] = zone_data.height
         
-        # Calculate demographic concentration (% of most common value for each demographic)
+        # Concentration scores
         concentration_scores = {}
         for col in available_cols:
-            counts = zone_data[col].value_counts()
-            if not counts.empty:
-                top_value = counts.index[0]
-                concentration = (counts.iloc[0] / counts.sum()) * 100
+            counts = zone_data[col].value_counts().sort('count', descending=True)
+            if counts.height > 0:
+                top_value = counts[0, col]
+                total_sum = counts['count'].sum()
+                concentration = (counts[0, 'count'] / total_sum) * 100
                 concentration_scores[col] = {
                     'dominant_value': top_value,
                     'concentration': concentration
@@ -242,7 +313,6 @@ def initialize_victim_demographic_zones(df):
 def predict_demographic_zone(lat, lon, demographics=None):
     """
     Predict demographic zone for a new point
-    If demographics dict provided, use it for better prediction
     """
     demo_data = cached_data.get('victim_demographic_zones')
     if not demo_data:
@@ -260,10 +330,16 @@ def predict_demographic_zone(lat, lon, demographics=None):
     
     if demographics and all(col in demographics for col in available_cols):
         # Create dataframe with demographics for encoding
-        demo_df = pd.DataFrame([demographics])
-        demo_encoded = encoder.transform(demo_df[available_cols])
+        # Since encoder expects a certain structure, we need to respect it. 
+        # Using pandas for intermediate easy encoding if needed, OR just numpy array construction
+        # BUT encoder was fitted on DataFrame values mostly. 
+        # Safest is to construct a DataFrame (pd or pl) and converting to numpy in same order
         
-        # Combine location and demographics with proper scaling
+        # Scikit's encoder.transform expects 2D array-like
+        row_values = [[demographics[col] for col in available_cols]]
+        demo_encoded = encoder.transform(row_values)
+        
+        # Combined features
         combined_features = np.hstack([coords_scaled * 0.7, demo_encoded * 3])
         
         # Predict zone
@@ -282,19 +358,18 @@ def predict_demographic_zone(lat, lon, demographics=None):
         
         return nearest_zone
 
-def initialize_crime_density_zones(df):
+def initialize_crime_density_zones(df: pl.DataFrame):
     """
-    Develop code to classify city regions into Low, Medium, and High crime rate zones
-    using kernel density estimation. Calculate crime density per square kilometer.
+    Classify city regions into Low, Medium, and High crime rate zones
     """
     print("Initializing crime density zones...")
     
     # Sample data if needed
-    sample_size = min(100000, len(df))
-    df_sample = df.sample(sample_size, random_state=42) if len(df) > sample_size else df
+    sample_size = min(100000, df.height)
+    df_sample = df.sample(sample_size, seed=42) if df.height > sample_size else df
     
     # Extract coordinates for density estimation
-    coords = df_sample[['latitude', 'longitude']].values
+    coords = df_sample.select(['latitude', 'longitude']).to_numpy()
     
     # Apply kernel density estimation
     kde = KernelDensity(bandwidth=0.01, metric='haversine')
@@ -317,7 +392,7 @@ def initialize_crime_density_zones(df):
     density = np.exp(log_density)
 
     # Convert to crimes per square km
-    total_crimes = len(df_sample)
+    total_crimes = df_sample.height
     avg_density = total_crimes / NYC_AREA_SQKM
 
     # Adjust density to crimes per sq km
@@ -345,7 +420,7 @@ def initialize_crime_density_zones(df):
     classifications = np.array([classify_density(d) for d in crime_density])
     classification_grid = classifications.reshape(lat_mesh.shape)
     
-    # Store data for API access
+    # Store data for API access (Numpy arrays, no Polars conversion needed for storage)
     density_data = {
         'kde': kde,
         'grid': {
@@ -373,7 +448,7 @@ def get_crime_density_classification(lat, lon):
     
     # Convert to crimes per sq km
     df = cached_data['df']
-    total_crimes = len(df)
+    total_crimes = df.height
     grid_size = len(density_data['grid']['lat_grid'])
     crime_density = density * (total_crimes / density) * (grid_size**2 / NYC_AREA_SQKM)
     
@@ -390,6 +465,8 @@ def get_crime_density_classification(lat, lon):
     # Grid data for heatmap
     grid = density_data['grid']
     grid_coordinates = []
+    
+    # This loop is slightly generic, but functional
     for i in range(len(grid['lat_grid'])):
         for j in range(len(grid['lon_grid'])):
             grid_coordinates.append({

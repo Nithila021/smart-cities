@@ -3,6 +3,8 @@ import re
 from geopy.geocoders import Nominatim
 from math import radians, cos, sin, sqrt, atan2
 from typing import Tuple, Optional, Dict
+import polars as pl
+import numpy as np
 
 # City name mappings to standardized codes
 CITY_NAME_MAPPINGS = {
@@ -142,17 +144,39 @@ def get_coordinates(address: str) -> Optional[Tuple[float, float]]:
     return None
 
 
-def find_nearby_points(df, lat, lon, distance_km=3):
-    """Find points within specified distance using haversine"""
+def find_nearby_points(df: pl.DataFrame, lat: float, lon: float, distance_km: float = 3.0) -> pl.DataFrame:
+    """Find points within specified distance using haversine with Polars."""
     # First filter with bounding box (faster)
-    # 0.01 degrees is roughly 1.1km at NYC's latitude
-    nearby = df[
-        (df['latitude'].between(lat - distance_km/111, lat + distance_km/111)) &
-        (df['longitude'].between(lon - distance_km/(111 * cos(radians(lat))), 
-                                lon + distance_km/(111 * cos(radians(lat)))))
-    ]
+    # 1 degree lat approx 111 km
+    lat_diff = distance_km / 111.0
+    lon_diff = distance_km / (111.0 * cos(radians(lat)))
     
-    # Then apply precise distance calculation
-    nearby['distance'] = nearby.apply(
-        lambda row: haversine(lat, lon, row['latitude'], row['longitude']), axis=1)
-    return nearby[nearby['distance'] <= distance_km]
+    # Bounding box filter
+    nearby = df.filter(
+        (pl.col('latitude') >= lat - lat_diff) &
+        (pl.col('latitude') <= lat + lat_diff) &
+        (pl.col('longitude') >= lon - lon_diff) &
+        (pl.col('longitude') <= lon + lon_diff)
+    )
+    
+    if nearby.height == 0:
+        return nearby.with_columns(pl.lit(0.0).alias('distance'))
+        
+    # Apply precise distance calculation
+    # Polars map_elements is slow for large data, but we filtered significantly
+    # Ideally use a vectorized custom expression or UDF if possible, but map_elements is easiest port
+    
+    # We can use apply (map_rows) on select columns
+    # Or struct mapping
+    
+    # Function to apply
+    def calc_dist(struct):
+        return haversine(lat, lon, struct['latitude'], struct['longitude'])
+        
+    nearby = nearby.with_columns(
+        pl.struct(['latitude', 'longitude'])
+        .map_elements(calc_dist, return_dtype=pl.Float64)
+        .alias('distance')
+    )
+    
+    return nearby.filter(pl.col('distance') <= distance_km)

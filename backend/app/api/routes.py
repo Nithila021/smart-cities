@@ -6,6 +6,7 @@ from app.services.analysis import analyze_safety, analyze_amenities
 from app.services.clustering import get_crime_density_classification
 from app.utils.report import generate_safety_report
 from app.services.demographics import parse_demographic_group, generate_custom_safety_recommendations
+import polars as pl
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
@@ -21,20 +22,41 @@ def ensure_data_initialized():
 def get_crime_heatmap():
     ensure_data_initialized()
     df = cached_data.get('df')
-    if df is None or df.empty:
+    if df is None or df.height == 0:
         return []
-    sample_size = min(5000, len(df))
-    heatmap_data = df.sample(sample_size)[['latitude', 'longitude', 'crime_type']].copy()
+    
+    sample_size = min(5000, df.height)
+    # Polars sample
+    heatmap_data = df.sample(sample_size, seed=42).select(['latitude', 'longitude', 'crime_type'])
 
     # Use severity_weight column if available, otherwise fall back to cached severity dict
-    if 'severity_weight' in df.columns:
-        heatmap_data['weight'] = df.sample(sample_size)['severity_weight']
+    if 'severity_weight' in heatmap_data.columns:
+        # Already have weight
+        # Just select it
+        # Note: df.sample above didn't select 'severity_weight'. 
+        # Re-select
+        heatmap_data = df.sample(sample_size, seed=42).select(['latitude', 'longitude', 'crime_type', 'severity_weight'])
+        
+        # Rename severity_weight to weight for frontend
+        heatmap_data = heatmap_data.rename({'severity_weight': 'weight'})
     else:
         crime_severity = cached_data.get('crime_severity', {})
-        heatmap_data['weight'] = heatmap_data['crime_type'].map(
-            lambda x: crime_severity.get(x, 3) / 10
+        # Polars map/replace is tricky for dict lookup if not efficient.
+        # But for 5000 rows it's instant.
+        
+        # Create mapping expression
+        # pl.col('crime_type').replace(crime_severity, default=3)
+        # Note: replace with dict is available in recent polars
+        
+        # Or map_elements
+        def get_weight(ctype):
+            return crime_severity.get(ctype, 3) / 10.0
+            
+        heatmap_data = heatmap_data.with_columns(
+            pl.col('crime_type').map_elements(get_weight, return_dtype=pl.Float64).alias('weight')
         )
-    return heatmap_data[['latitude', 'longitude', 'weight']].to_dict('records')
+        
+    return heatmap_data.select(['latitude', 'longitude', 'weight']).to_dicts()
 
 
 def get_demographic_analysis_data():
@@ -285,4 +307,6 @@ def chat_endpoint():
         
     except Exception as e:  # REQUIRED EXCEPT CLAUSE
         print(f"Server Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Internal server error"}), 500

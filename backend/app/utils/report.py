@@ -2,7 +2,7 @@
 
 import folium
 from folium.plugins import HeatMap, MarkerCluster
-
+import polars as pl
 
 def create_safety_map(lat, lon, nearby_crimes, analysis_result):
     """Create an interactive safety map with crime data."""
@@ -17,25 +17,34 @@ def create_safety_map(lat, lon, nearby_crimes, analysis_result):
     ).add_to(safety_map)
 
     # Add crime markers
-    if not nearby_crimes.empty:
+    # Handle Polars DataFrame
+    if isinstance(nearby_crimes, pl.DataFrame):
+        is_empty = nearby_crimes.height == 0
+        rows = nearby_crimes.iter_rows(named=True) if not is_empty else []
+    else:
+        # Fallback for pandas or list
+        is_empty = nearby_crimes.empty if hasattr(nearby_crimes, 'empty') else not nearby_crimes
+        rows = nearby_crimes.to_dict('records') if hasattr(nearby_crimes, 'to_dict') else nearby_crimes
+
+    if not is_empty:
         # Create marker cluster for crimes
         marker_cluster = MarkerCluster().add_to(safety_map)
 
         # Add individual crime markers
-        for _, crime in nearby_crimes.iterrows():
+        heat_data = []
+        for crime in rows:
             folium.Marker(
                 [crime["latitude"], crime["longitude"]],
                 popup=(
                     f"Type: {crime['crime_type']}<br>"
-                    f"Distance: {crime['distance']:.2f} km"
+                    f"Distance: {crime.get('distance', 0):.2f} km"
                 ),
                 icon=folium.Icon(color="red", icon="warning-sign", prefix="fa"),
             ).add_to(marker_cluster)
+            
+            heat_data.append([crime["latitude"], crime["longitude"]])
 
         # Add heatmap layer
-        heat_data = [
-            [row["latitude"], row["longitude"]] for _, row in nearby_crimes.iterrows()
-        ]
         HeatMap(heat_data, radius=15).add_to(safety_map)
 
     # Create a circle showing the safety score
@@ -153,7 +162,7 @@ def generate_safety_report(analysis_result, address_str=None, amenity_type=None)
     report.append("\nNEARBY ACTIVITY")
     report.append(f"Total Nearby Crimes: {analysis_result['nearby_crime_count']}")
 
-    if "time_analysis" in analysis_result:
+    if "time_analysis" in analysis_result and "time_of_day" in analysis_result["time_analysis"]:
         time_data = analysis_result["time_analysis"]["time_of_day"]
         total = sum(time_data.values())
 

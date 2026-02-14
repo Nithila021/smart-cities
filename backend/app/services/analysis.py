@@ -1,7 +1,7 @@
 # app/services/analysis.py
 from datetime import datetime, timedelta
 import numpy as np
-import pandas as pd
+import polars as pl
 from app.core.state import cached_data
 from app.services.clustering import predict_dbscan_cluster, predict_demographic_zone, get_crime_density_classification
 from app.utils.geo import find_nearby_points
@@ -30,14 +30,7 @@ USE_DATABASE = False  # Set to True when ready to use PostgreSQL
 
 
 def get_demographic_weights(demographic_group: str = 'general') -> dict:
-    """Get demographic impact weights, preferring database if available.
-
-    Args:
-        demographic_group: One of 'children', 'women', 'elderly', 'general'
-
-    Returns:
-        Dict mapping crime_category to impact_weight
-    """
+    """Get demographic impact weights, preferring database if available."""
     if USE_DATABASE and DB_AVAILABLE:
         try:
             weights = db_get_demographic_weights(demographic_group)
@@ -46,24 +39,11 @@ def get_demographic_weights(demographic_group: str = 'general') -> dict:
         except Exception:
             pass
 
-    # Fallback to hardcoded defaults
     return DEFAULT_DEMOGRAPHIC_WEIGHTS.get(demographic_group, DEFAULT_DEMOGRAPHIC_WEIGHTS['general'])
 
 
 def apply_demographic_weighting(base_score: float, crime_counts: dict, demographic_group: str = 'general') -> float:
-    """Apply demographic-specific weighting to a safety score.
-
-    This is a core feature for personalized risk assessment - crimes that
-    disproportionately affect certain demographics are weighted higher.
-
-    Args:
-        base_score: Base safety score (0-100)
-        crime_counts: Dict of {crime_category: count}
-        demographic_group: User's demographic group
-
-    Returns:
-        Adjusted safety score (0-100)
-    """
+    """Apply demographic-specific weighting to a safety score."""
     if demographic_group == 'general' or not crime_counts:
         return base_score
 
@@ -91,14 +71,7 @@ def apply_demographic_weighting(base_score: float, crime_counts: dict, demograph
 
 
 def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
-    """Perform safety analysis for given coordinates.
-
-    Args:
-        lat: Latitude
-        lon: Longitude
-        use_db: Override for database usage (None = use global setting)
-        demographic_group: User demographic for personalized scoring ('general', 'women', 'children', 'elderly')
-    """
+    """Perform safety analysis for given coordinates using Polars."""
     # Import locally to avoid circular dependencies if any
     from app.services.data_loader import initialize_data
     
@@ -124,10 +97,8 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
     if should_use_db:
         try:
             safety_score = db_calculate_risk_score(lat, lon, radius_meters=3000)
-            # DB returns risk, we want safety (inverse)
             safety_score = 100 - safety_score
         except Exception:
-            # Fall back to in-memory
             safety_score = cached_data['zone_safety_scores'].get(zone, 50)
     else:
         safety_score = cached_data['zone_safety_scores'].get(zone, 50)
@@ -142,50 +113,65 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
     if should_use_db:
         try:
             nearby_list = db_get_nearby_crimes(lat, lon, radius_meters=3000)
-            # Convert to DataFrame for compatibility with rest of code
-            nearby = pd.DataFrame(nearby_list) if nearby_list else pd.DataFrame()
+            # If standard list of dicts, make Polars DF
+            if nearby_list:
+                nearby = pl.DataFrame(nearby_list)
+            else:
+                nearby = pl.DataFrame()
         except Exception:
             nearby = find_nearby_points(df, lat, lon, 3)
     else:
         nearby = find_nearby_points(df, lat, lon, 3)
     
-    # Time of day analysis (if datetime column exists)
+    # Time of day analysis
     time_analysis = {}
-    if 'cmplnt_fr_datetime' in df.columns:
-        thirty_days_ago = datetime.now() - timedelta(days=30)
-        recent = nearby[nearby['cmplnt_fr_datetime'] >= thirty_days_ago]
+    if 'occurred_at' in df.columns: # Was cmplnt_fr_datetime/parsed_date. New cleaner uses occurred_at
+        # Check datetime column name
+        dt_col = 'occurred_at' if 'occurred_at' in nearby.columns else 'cmplnt_fr_dt' 
+        # Actually our cleaner standardized on 'occurred_at'.
         
-        if not nearby.empty and 'cmplnt_fr_datetime' in nearby.columns:
-            nearby['hour'] = nearby['cmplnt_fr_datetime'].dt.hour
-            hour_groups = {
-                'morning': range(6, 12),
-                'afternoon': range(12, 18),
-                'evening': range(18, 24),
-                'night': list(range(0, 6))
-            }
+        if dt_col in nearby.columns and nearby.height > 0:
+            thirty_days_ago = datetime.now() - timedelta(days=30)
             
-            time_analysis = {
-                'total_recent': len(recent),
-                'time_of_day': {
-                    period: len(nearby[nearby['hour'].isin(hours)])
-                    for period, hours in hour_groups.items()
-                }
-            }
+            # Filter recent
+            # Polars datetime filter
+            recent = nearby.filter(pl.col(dt_col) >= thirty_days_ago) # works if dt_col is proper Datetime type
+            
+            # Hour analysis
+            # We have 'hour_of_day' from cleaner. simpler.
+            if 'hour_of_day' in nearby.columns:
+                 hours = nearby['hour_of_day']
+                 
+                 time_analysis = {
+                     'total_recent': recent.height,
+                     'time_of_day': {
+                         'morning': nearby.filter((pl.col('hour_of_day') >= 6) & (pl.col('hour_of_day') < 12)).height,
+                         'afternoon': nearby.filter((pl.col('hour_of_day') >= 12) & (pl.col('hour_of_day') < 18)).height,
+                         'evening': nearby.filter((pl.col('hour_of_day') >= 18) & (pl.col('hour_of_day') < 24)).height,
+                         'night': nearby.filter(pl.col('hour_of_day') < 6).height
+                     }
+                 }
     
     # Get DBSCAN cluster info
     dbscan_cluster = predict_dbscan_cluster(lat, lon)
     dbscan_info = None
-    if dbscan_cluster is not None:
+    if dbscan_cluster is not None and dbscan_cluster != -1: # -1 is outlier
         dbscan_data = cached_data.get('dbscan_clusters')
         if dbscan_data and dbscan_cluster in dbscan_data['dominant_crimes']:
             dbscan_info = dbscan_data['dominant_crimes'][dbscan_cluster]
     
-    # Get demographic zone info
+    # Get demographics for zone prediction
     demographics = {}
-    for col in ['vic_age_group', 'vic_race', 'vic_sex']:
-        if col in nearby.columns:
-            demographics[col] = nearby[col].mode().iloc[0] if not nearby.empty and not nearby[col].dropna().empty else None
-    
+    if nearby.height > 0:
+        for col in ['vic_age_group', 'vic_race', 'vic_sex']:
+             if col in nearby.columns:
+                 # Mode in Polars
+                 modes = nearby[col].mode()
+                 if len(modes) > 0:
+                     demographics[col] = modes[0]
+                 else:
+                     demographics[col] = None
+
     demographic_zone = predict_demographic_zone(lat, lon, demographics)
     demographic_info = None
     if demographic_zone is not None:
@@ -197,10 +183,16 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
     density_info = get_crime_density_classification(lat, lon)
 
     # Get crime category counts for demographic weighting
-    crime_types = nearby['crime_type'].value_counts().to_dict() if not nearby.empty else {}
+    crime_types = {}
+    if nearby.height > 0:
+        # Value counts to dict
+        vc = nearby['crime_type'].value_counts()
+        crime_types = {row['crime_type']: row['count'] for row in vc.iter_rows(named=True)}
+
     crime_categories = {}
-    if 'crime_category' in nearby.columns and not nearby.empty:
-        crime_categories = nearby['crime_category'].value_counts().to_dict()
+    if 'crime_category' in nearby.columns and nearby.height > 0:
+        vc = nearby['crime_category'].value_counts()
+        crime_categories = {row['crime_category']: row['count'] for row in vc.iter_rows(named=True)}
 
     # Apply demographic-specific weighting to safety score
     adjusted_safety_score = apply_demographic_weighting(
@@ -215,7 +207,7 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
         'zone': int(zone),
         'dominant_crime': dominant_crime_info['dominant_crime'],
         'common_crimes': dominant_crime_info['common_crimes'],
-        'nearby_crime_count': len(nearby),
+        'nearby_crime_count': nearby.height,
         'crime_types': crime_types,
         'crime_categories': crime_categories,
         'lat': lat,
@@ -254,25 +246,35 @@ def analyze_amenities(lat, lon, radius_km=1):
     # Find nearby amenities
     nearby = find_nearby_points(amenities_df, lat, lon, radius_km)
     
-    # Group by type
-    type_counts = nearby['type'].value_counts().to_dict() if 'type' in nearby.columns else {}
+    type_counts = {}
+    if nearby.height > 0 and 'type' in nearby.columns:
+        vc = nearby['type'].value_counts()
+        type_counts = {row['type']: row['count'] for row in vc.iter_rows(named=True)}
     
     # Get closest amenities of each type
     closest_amenities = {}
-    if not nearby.empty and 'type' in nearby.columns:
-        for amenity_type in nearby['type'].unique():
-            type_df = nearby[nearby['type'] == amenity_type].sort_values('distance')
-            if not type_df.empty:
-                closest = type_df.iloc[0]
-                closest_amenities[amenity_type] = {
-                    'name': closest.get('name', f"Unnamed {amenity_type}"),
-                    'distance_km': round(closest['distance'], 2),
-                    'latitude': closest['latitude'],
-                    'longitude': closest['longitude']
-                }
+    if nearby.height > 0 and 'type' in nearby.columns:
+        # Sort by distance
+        nearby_sorted = nearby.sort('distance')
+        
+        # Unique types
+        unique_types = nearby_sorted['type'].unique().to_list()
+        
+        for amenity_type in unique_types:
+            # Filter for type and take first
+            closest = nearby_sorted.filter(pl.col('type') == amenity_type)[0] # Row as tuple/struct
+            # or .row(0, named=True)
+            closest_dict = nearby_sorted.filter(pl.col('type') == amenity_type).row(0, named=True)
+            
+            closest_amenities[amenity_type] = {
+                'name': closest_dict.get('name', f"Unnamed {amenity_type}"),
+                'distance_km': round(closest_dict['distance'], 2),
+                'latitude': closest_dict['latitude'],
+                'longitude': closest_dict['longitude']
+            }
     
     return {
-        'nearby_count': len(nearby),
+        'nearby_count': nearby.height,
         'type_counts': type_counts,
         'closest_amenities': closest_amenities
     }

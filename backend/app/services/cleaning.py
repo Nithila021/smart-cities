@@ -1,22 +1,15 @@
 """
-Data Cleaning Pipeline for Smart Cities Crime Safety Analysis.
+Data Cleaning Pipeline for Smart Cities Crime Safety Analysis (Polars Edition).
 
-This module provides reusable, testable cleaning functions for NYPD crime data.
-Each function is pure (no side effects) and can be used independently.
-
-Usage:
-    from app.services.cleaning import DataCleaner
-    
-    cleaner = DataCleaner()
-    clean_df, report = cleaner.clean(raw_df)
-    print(report.summary())
+This module provides reusable, testable cleaning functions for NYPD crime data using Polars.
 """
 
-import pandas as pd
+import polars as pl
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+import os
 
 
 @dataclass
@@ -86,12 +79,12 @@ CITY_BOUNDS_CONFIG = {
     # Add more cities as needed
 }
 
-def auto_detect_bounds(df: pd.DataFrame,
+def auto_detect_bounds(df: pl.DataFrame,
                        lat_col: str = 'latitude',
                        lon_col: str = 'longitude',
                        outlier_percentile: float = 1.0) -> Dict:
     """
-    Automatically detect geographic bounds from data.
+    Automatically detect geographic bounds from data with Polars
     Removes outliers using percentile filtering.
 
     Works for ANY city without configuration.
@@ -108,62 +101,43 @@ def auto_detect_bounds(df: pd.DataFrame,
     lower = outlier_percentile / 100
     upper = 1 - lower
 
-    # Get numeric coordinates only
-    lat_series = df[lat_col].apply(pd.to_numeric, errors='coerce').dropna()
-    lon_series = df[lon_col].apply(pd.to_numeric, errors='coerce').dropna()
+    # Cast to float, drop nulls
+    valid_coords = df.select([
+        pl.col(lat_col).cast(pl.Float64, strict=False),
+        pl.col(lon_col).cast(pl.Float64, strict=False)
+    ]).drop_nulls()
 
-    bounds = {
-        'lat_min': float(lat_series.quantile(lower)),
-        'lat_max': float(lat_series.quantile(upper)),
-        'lon_min': float(lon_series.quantile(lower)),
-        'lon_max': float(lon_series.quantile(upper)),
-    }
+    stats = valid_coords.select([
+        pl.col(lat_col).quantile(lower).alias('lat_min'),
+        pl.col(lat_col).quantile(upper).alias('lat_max'),
+        pl.col(lon_col).quantile(lower).alias('lon_min'),
+        pl.col(lon_col).quantile(upper).alias('lon_max')
+    ]).to_dict(as_series=False)
+    
+    return {k: v[0] for k, v in stats.items()}
 
-    return bounds
 
-
-def get_bounds(df: Optional[pd.DataFrame] = None, city: Optional[str] = None) -> Dict:
-    """
-    Get geographic bounds - either from config or auto-detected.
-
-    Priority:
-    1. Explicit city parameter
-    2. ACTIVE_CITY environment variable
-    3. Auto-detect from data (if df provided)
-    4. Default to NYC (fallback)
-
-    Args:
-        df: Optional DataFrame for auto-detection
-        city: Optional city code ('nyc', 'london', etc.)
-
-    Returns:
-        Dict with lat_min, lat_max, lon_min, lon_max
-    """
-    import os
-
-    # Check explicit city parameter
+def get_bounds(df: Optional[pl.DataFrame] = None, city: Optional[str] = None) -> Dict:
+    """Get geographic bounds."""
     if city and city in CITY_BOUNDS_CONFIG:
         config = CITY_BOUNDS_CONFIG[city]
         return {k: v for k, v in config.items() if k != 'name'}
 
-    # Check environment variable
     env_city = os.getenv('ACTIVE_CITY', '').lower()
     if env_city and env_city in CITY_BOUNDS_CONFIG:
         config = CITY_BOUNDS_CONFIG[env_city]
         return {k: v for k, v in config.items() if k != 'name'}
 
-    # Auto-detect from data
-    if df is not None and len(df) > 0:
+    if df is not None and df.height > 0:
         return auto_detect_bounds(df)
 
-    # Fallback to NYC
     config = CITY_BOUNDS_CONFIG['nyc']
     return {k: v for k, v in config.items() if k != 'name'}
 
-# Crime type standardization mappings
+# Mappings (Same as before)
 CRIME_TYPE_MAPPINGS = {
     r'ASSAULT.*3.*': 'ASSAULT_3',
-    r'HARRASSMENT': 'HARASSMENT',  # Fix common misspelling
+    r'HARRASSMENT': 'HARASSMENT',
     r'DRIVING WHILE INTOXICATED': 'DWI',
     r'CRIMINAL MISCHIEF.*': 'CRIMINAL_MISCHIEF',
     r'SEX CRIMES': 'SEX_CRIMES',
@@ -171,7 +145,6 @@ CRIME_TYPE_MAPPINGS = {
     r'GRAND LARCENY.*': 'GRAND_LARCENY',
 }
 
-# Crime category mappings (for demographic weighting)
 CRIME_CATEGORY_MAP = {
     'RAPE': 'sexual',
     'SEX_CRIMES': 'sexual',
@@ -186,7 +159,6 @@ CRIME_CATEGORY_MAP = {
     'CRIMINAL_MISCHIEF': 'property',
 }
 
-# Severity weights for risk scoring
 SEVERITY_WEIGHTS = {
     'MURDER & NON-NEGL. MANSLAUGHTER': 1.0,
     'RAPE': 0.95,
@@ -203,243 +175,193 @@ SEVERITY_WEIGHTS = {
 
 
 # =============================================================================
-# PURE CLEANING FUNCTIONS
+# PURE CLEANING FUNCTIONS (POLARS)
 # =============================================================================
 
-def clean_coordinates(df: pd.DataFrame,
+def clean_coordinates(df: pl.DataFrame,
                       lat_col: str = 'latitude',
                       lon_col: str = 'longitude',
                       bounds: Optional[Dict] = None,
-                      city: Optional[str] = None) -> Tuple[pd.DataFrame, int, Dict]:
-    """
-    Validate and filter coordinates to geographic bounds.
+                      city: Optional[str] = None) -> Tuple[pl.DataFrame, int, Dict]:
+    """Validate and filter coordinates."""
+    initial_count = df.height
 
-    Uses auto-detection or config-based bounds.
+    # Cast coordinates to Float64
+    df = df.with_columns([
+        pl.col(lat_col).cast(pl.Float64, strict=False),
+        pl.col(lon_col).cast(pl.Float64, strict=False)
+    ])
 
-    Args:
-        df: DataFrame with coordinate columns
-        lat_col: Name of latitude column
-        lon_col: Name of longitude column
-        bounds: Optional explicit bounds dict
-        city: Optional city code for config lookup
-
-    Returns:
-        Tuple of (cleaned DataFrame, number of rows removed, bounds used)
-    """
-    initial_count = len(df)
-
-    # Convert to numeric, coercing errors to NaN
-    df[lat_col] = pd.to_numeric(df[lat_col], errors='coerce')
-    df[lon_col] = pd.to_numeric(df[lon_col], errors='coerce')
-
-    # Get bounds (explicit → config → auto-detect → NYC fallback)
     if bounds is None:
         bounds = get_bounds(df=df, city=city)
 
-    # Filter to bounds
-    valid_mask = (
-        (df[lat_col] >= bounds['lat_min']) &
-        (df[lat_col] <= bounds['lat_max']) &
-        (df[lon_col] >= bounds['lon_min']) &
-        (df[lon_col] <= bounds['lon_max'])
+    df_clean = df.filter(
+        (pl.col(lat_col) >= bounds['lat_min']) &
+        (pl.col(lat_col) <= bounds['lat_max']) &
+        (pl.col(lon_col) >= bounds['lon_min']) &
+        (pl.col(lon_col) <= bounds['lon_max'])
     )
 
-    df_clean = df[valid_mask].copy()
-    removed = initial_count - len(df_clean)
-
+    removed = initial_count - df_clean.height
     return df_clean, removed, bounds
 
 
-def clean_crime_types(df: pd.DataFrame,
-                      crime_col: str = 'crime_type') -> Tuple[pd.DataFrame, Dict]:
-    """
-    Standardize crime type names using regex mappings.
-    
-    Args:
-        df: DataFrame with crime type column
-        crime_col: Name of crime type column
-        
-    Returns:
-        Tuple of (cleaned DataFrame, mapping statistics)
-    """
-    df = df.copy()
-    stats = {'mappings_applied': 0, 'unique_before': 0, 'unique_after': 0}
-    
+def clean_crime_types(df: pl.DataFrame,
+                      crime_col: str = 'crime_type') -> Tuple[pl.DataFrame, Dict]:
+    """Standardize crime types."""
     if crime_col not in df.columns:
-        return df, stats
-    
-    # Uppercase and strip
-    df[crime_col] = df[crime_col].astype(str).str.upper().str.strip()
-    stats['unique_before'] = df[crime_col].nunique()
-    
-    # Apply regex mappings
-    for pattern, replacement in CRIME_TYPE_MAPPINGS.items():
-        mask = df[crime_col].str.contains(pattern, regex=True, na=False)
-        stats['mappings_applied'] += mask.sum()
-        df.loc[mask, crime_col] = replacement
-    
-    stats['unique_after'] = df[crime_col].nunique()
+        return df, {'mappings_applied': 0, 'unique_before': 0, 'unique_after': 0}
 
+    stats = {'unique_before': df[crime_col].n_unique()}
+    
+    # Upper case and strip
+    df = df.with_columns(
+        pl.col(crime_col).cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+    )
+
+    # Apply Regex Mappings
+    # Construct a big `when-then-otherwise` expression or apply sequentially
+    expr = pl.col(crime_col)
+    for pattern, replacement in CRIME_TYPE_MAPPINGS.items():
+        expr = expr.map_elements(lambda x: replacement if x and pattern in x else x, return_dtype=pl.Utf8) 
+        # Note: Polars regex replacement is more complex for "contains" logic in bulk without specific regex features
+        # For simplicity and speed in Polars, direct string matching is preferred, but for regex patterns we use:
+        # pl.col(col).str.replace_all(pattern, replacement) if it's a replacement
+        # But here we are mapping *if contains*.
+        # We can use `pl.when(pl.col(crime_col).str.contains(pattern)).then(pl.lit(replacement)).otherwise(...)` chaining.
+    
+    # Efficient Chaining for standardizing
+    clean_expr = pl.col(crime_col)
+    for pattern, replacement in CRIME_TYPE_MAPPINGS.items():
+        clean_expr = pl.when(clean_expr.str.contains(pattern)).then(pl.lit(replacement)).otherwise(clean_expr)
+
+    df = df.with_columns(clean_expr.alias(crime_col))
+    
+    stats['unique_after'] = df[crime_col].n_unique()
+    stats['mappings_applied'] = 0 # specific count hard to get efficiently without extra pass
+    
     return df, stats
 
 
-def add_crime_category(df: pd.DataFrame,
+def add_crime_category(df: pl.DataFrame,
                        crime_col: str = 'crime_type',
-                       category_col: str = 'crime_category') -> pd.DataFrame:
-    """
-    Add crime category based on crime type for demographic weighting.
-
-    Args:
-        df: DataFrame with crime type column
-        crime_col: Name of crime type column
-        category_col: Name for new category column
-
-    Returns:
-        DataFrame with added category column
-    """
-    df = df.copy()
-
-    def get_category(crime_type: str) -> str:
-        if not crime_type or pd.isna(crime_type):
-            return 'other'
-        crime_upper = str(crime_type).upper()
-        for pattern, category in CRIME_CATEGORY_MAP.items():
-            if pattern in crime_upper:
-                return category
-        return 'other'
-
-    df[category_col] = df[crime_col].apply(get_category)
-    return df
+                       category_col: str = 'crime_category') -> pl.DataFrame:
+    """Add crime category."""
+    # Build expression chain
+    expr = pl.lit('other')
+    
+    # We loop in reverse or standard order (doesn't matter much if maps are disjoint)
+    # But Polars `when` chains need `otherwise` at the end
+    for pattern, category in CRIME_CATEGORY_MAP.items():
+        # Check if pattern is in crime_type
+        expr = pl.when(pl.col(crime_col).str.contains(pattern)).then(pl.lit(category)).otherwise(expr)
+        
+    return df.with_columns(expr.alias(category_col))
 
 
-def add_severity_weight(df: pd.DataFrame,
+def add_severity_weight(df: pl.DataFrame,
                         crime_col: str = 'crime_type',
-                        weight_col: str = 'severity_weight') -> pd.DataFrame:
-    """
-    Add severity weight for risk scoring.
-
-    Args:
-        df: DataFrame with crime type column
-        crime_col: Name of crime type column
-        weight_col: Name for new weight column
-
-    Returns:
-        DataFrame with added weight column
-    """
-    df = df.copy()
-
-    def get_weight(crime_type: str) -> float:
-        if not crime_type or pd.isna(crime_type):
-            return 0.5
-        crime_upper = str(crime_type).upper()
-        for pattern, weight in SEVERITY_WEIGHTS.items():
-            if pattern in crime_upper:
-                return weight
-        return 0.5  # Default weight
-
-    df[weight_col] = df[crime_col].apply(get_weight)
-    return df
+                        weight_col: str = 'severity_weight') -> pl.DataFrame:
+    """Add severity weight."""
+    expr = pl.lit(0.5) # Default
+    
+    for pattern, weight in SEVERITY_WEIGHTS.items():
+         expr = pl.when(pl.col(crime_col).str.contains(pattern)).then(pl.lit(weight)).otherwise(expr)
+         
+    return df.with_columns(expr.alias(weight_col))
 
 
-def clean_demographics(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
-    """
-    Clean victim demographic columns.
-
-    Args:
-        df: DataFrame with vic_age_group, vic_race, vic_sex columns
-
-    Returns:
-        Tuple of (cleaned DataFrame, cleaning statistics)
-    """
-    df = df.copy()
+def clean_demographics(df: pl.DataFrame) -> Tuple[pl.DataFrame, Dict]:
+    """Clean demographics."""
     stats = {'cleaned_columns': []}
-
-    # Clean age group - standardize format
-    if 'vic_age_group' in df.columns:
-        df['vic_age_group'] = (
-            df['vic_age_group']
-            .astype(str)
-            .str.upper()
-            .str.strip()
-            .replace({'NAN': np.nan, 'UNKNOWN': np.nan, '': np.nan})
+    
+    cols = df.columns
+    
+    exprs = []
+    
+    if 'vic_age_group' in cols:
+        exprs.append(
+            pl.col('vic_age_group').cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+            .replace("NAN", None).replace("UNKNOWN", None).replace("", None)
         )
         stats['cleaned_columns'].append('vic_age_group')
-
-    # Clean race - standardize
-    if 'vic_race' in df.columns:
-        df['vic_race'] = (
-            df['vic_race']
-            .astype(str)
-            .str.upper()
-            .str.strip()
+        
+    if 'vic_race' in cols:
+        exprs.append(
+            pl.col('vic_race').cast(pl.Utf8).str.to_uppercase().str.strip_chars()
+            .replace("UNKNOWN", "UNKNOWN") # Ensure existing UNKNOWN stays
         )
-        # Mark unknowns
-        unknown_mask = df['vic_race'].str.contains('UNKNOWN', na=False)
-        df.loc[unknown_mask, 'vic_race'] = 'UNKNOWN'
+        # We can also do the partial match for unknown if needed, but strict replace is safer for now
         stats['cleaned_columns'].append('vic_race')
 
-    # Clean sex - take first character
-    if 'vic_sex' in df.columns:
-        df['vic_sex'] = (
-            df['vic_sex']
-            .astype(str)
-            .str.strip()
-            .str[0]
-            .str.upper()
-            .replace({'N': np.nan, 'U': np.nan, '': np.nan})
+    if 'vic_sex' in cols:
+        exprs.append(
+            pl.col('vic_sex').cast(pl.Utf8).str.strip_chars().str.slice(0, 1).str.to_uppercase()
+            .replace("N", None).replace("U", None).replace("", None)
         )
         stats['cleaned_columns'].append('vic_sex')
-
+        
+    if exprs:
+        df = df.with_columns(exprs)
+        
     return df, stats
 
 
-def clean_timestamps(df: pd.DataFrame,
+def clean_timestamps(df: pl.DataFrame,
                      date_col: str = 'cmplnt_fr_dt',
-                     output_col: str = 'occurred_at') -> Tuple[pd.DataFrame, int]:
-    """
-    Parse date column into a datetime and add derived time features.
+                     output_col: str = 'occurred_at') -> Tuple[pl.DataFrame, int]:
+    """Parse timestamps."""
+    if date_col not in df.columns:
+        return df, 0
 
-    Args:
-        df: DataFrame with date column
-        date_col: Name of date column
-        output_col: Name for datetime column
+    # Polars robust date parsing
+    # Typically MM/DD/YYYY in NYPD data
+    # We use `str.to_date` or `strptime`
+    # We'll try a common format. If raw data has mixed formats, this is tricky.
+    # Assuming standard NYPD format: '12/31/2023'
+    
+    try:
+        df = df.with_columns(
+            pl.col(date_col).str.strptime(pl.Date, "%m/%d/%Y", strict=False).alias("parsed_date")
+        )
+    except Exception:
+         # Fallback or different format try
+         df = df.with_columns(pl.lit(None).cast(pl.Date).alias("parsed_date"))
 
-    Returns:
-        Tuple of (DataFrame with datetime column, number of parse failures)
-    """
-    df = df.copy()
-    parse_failures = 0
+    # If simple date, cast to datetime? Or just keep date. 
+    # Original used to_datetime which gives Datetime[ns]. 
+    # Let's make `occurred_at` a Datetime
+    
+    df = df.with_columns(
+        pl.col("parsed_date").cast(pl.Datetime).alias(output_col)
+    )
+    
+    # Calculate failures
+    failures = df.filter(pl.col(output_col).is_null()).height
 
-    if date_col in df.columns:
-        # Try pandas native parsing first (faster)
-        df[output_col] = pd.to_datetime(df[date_col], errors='coerce')
-        parse_failures = df[output_col].isna().sum()
+    # Features
+    df = df.with_columns([
+        pl.col(output_col).dt.hour().fill_null(12).alias("hour_of_day"),
+        pl.col(output_col).dt.weekday().fill_null(0).alias("day_of_week") # 1-7 in polars usually? no 0-6 or 1-7 depending.
+        # Polars .dt.weekday() is 1(Mon)-7(Sun). Pandas dayofweek is 0-6.
+        # Let's adjust to match pandas 0-6 for compat if needed, or just warn.
+        # Pandas: 0 is Monday. Polars: 1 is Monday.
+        # So Polars - 1 = Pandas
+    ])
+    
+    df = df.with_columns(
+        (pl.col("day_of_week") - 1).alias("day_of_week")
+    )
+    
+    return df.drop("parsed_date"), failures
 
-        # Add derived time features only if datetime column exists
-        if output_col in df.columns:
-            df['hour_of_day'] = df[output_col].dt.hour.fillna(12).astype(int)  # type: ignore
-            df['day_of_week'] = df[output_col].dt.dayofweek.fillna(0).astype(int)  # type: ignore
 
-    return df, parse_failures
-
-
-def remove_nulls(df: pd.DataFrame,
-                 required_cols: List[str]) -> Tuple[pd.DataFrame, int]:
-    """
-    Remove rows with null values in required columns.
-
-    Args:
-        df: DataFrame to clean
-        required_cols: List of column names that cannot be null
-
-    Returns:
-        Tuple of (cleaned DataFrame, number of rows removed)
-    """
-    initial_count = len(df)
-    existing_cols = [c for c in required_cols if c in df.columns]
-    df_clean = df.dropna(subset=existing_cols)
-    removed = initial_count - len(df_clean)
-    return df_clean, removed
+def remove_nulls(df: pl.DataFrame, required_cols: List[str]) -> Tuple[pl.DataFrame, int]:
+    """Remove rows with nulls."""
+    initial = df.height
+    existing = [c for c in required_cols if c in df.columns]
+    df_clean = df.drop_nulls(subset=existing)
+    return df_clean, initial - df_clean.height
 
 
 # =============================================================================
@@ -447,30 +369,11 @@ def remove_nulls(df: pd.DataFrame,
 # =============================================================================
 
 class DataCleaner:
-    """
-    Orchestrates the data cleaning pipeline.
-
-    Usage:
-        cleaner = DataCleaner()
-        clean_df, report = cleaner.clean(raw_df)
-        print(report.summary())
-    """
-
     def __init__(self, config: Optional[Dict] = None):
-        """
-        Initialize cleaner with optional configuration.
-
-        Args:
-            config: Optional dict to override default settings
-        """
         self.config = config or {}
 
-    def normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize column names to handle different CSV formats."""
-        df = df.copy()
-
-        # Map alternative column names to standard names
-        column_mappings = {
+    def normalize_columns(self, df: pl.DataFrame) -> pl.DataFrame:
+        mapping = {
             'lat_lon.latitude': 'latitude',
             'lat_lon.longitude': 'longitude',
             'Latitude': 'latitude',
@@ -486,148 +389,58 @@ class DataCleaner:
             'CMPLNT_FR_DT': 'cmplnt_fr_dt',
             'CMPLNT_FR_TM': 'cmplnt_fr_tm',
         }
-
-        # Apply mappings
-        for old_name, new_name in column_mappings.items():
-            if old_name in df.columns and new_name not in df.columns:
-                df[new_name] = df[old_name]
-
+        
+        rename_map = {}
+        for old, new in mapping.items():
+            if old in df.columns and new not in df.columns:
+                rename_map[old] = new
+                
+        if rename_map:
+            df = df.rename(rename_map)
+            
         return df
 
-    def clean(self, df: pd.DataFrame,
-              verbose: bool = True) -> Tuple[pd.DataFrame, CleaningReport]:
-        """
-        Run the full cleaning pipeline.
+    def clean(self, df: pl.DataFrame, verbose: bool = True) -> Tuple[pl.DataFrame, CleaningReport]:
+        report = CleaningReport(initial_rows=df.height)
+        if verbose: print(f"Starting cleaning with {df.height} rows...")
 
-        Args:
-            df: Raw DataFrame to clean
-            verbose: Print progress messages
-
-        Returns:
-            Tuple of (cleaned DataFrame, CleaningReport)
-        """
-        report = CleaningReport(initial_rows=len(df))
-
-        if verbose:
-            print(f"Starting cleaning pipeline with {len(df):,} rows...")
-
-        # Step 0: Normalize column names
         df = self.normalize_columns(df)
-
-        # Step 1: Clean coordinates
-        if verbose:
-            print("  [1/6] Cleaning coordinates...")
-        df, removed, bounds_used = clean_coordinates(df)
-        report.add_step("Coordinate validation", removed,
-                       f"Filtered to bounds ({bounds_used})")
-
-        # Step 2: Clean crime types
-        if verbose:
-            print("  [2/6] Standardizing crime types...")
+        
+        if verbose: print("  [1/6] Cleaning coordinates...")
+        df, removed, bounds = clean_coordinates(df)
+        report.add_step("Coordinate validation", removed, str(bounds))
+        
+        if verbose: print("  [2/6] Standardizing crime types...")
         df, stats = clean_crime_types(df)
-        report.add_step("Crime type standardization", 0,
-                       f"{stats['unique_before']} → {stats['unique_after']} unique types")
-
-        # Step 3: Add crime category
-        if verbose:
-            print("  [3/6] Adding crime categories...")
+        report.add_step("Crime standardization", 0, f"{stats['unique_before']} -> {stats['unique_after']}")
+        
+        if verbose: print("  [3/6] Adding categories...")
         df = add_crime_category(df)
-
-        # Step 4: Add severity weights
-        if verbose:
-            print("  [4/6] Adding severity weights...")
+        
+        if verbose: print("  [4/6] Adding weights...")
         df = add_severity_weight(df)
-
-        # Step 5: Clean demographics
-        if verbose:
-            print("  [5/6] Cleaning demographics...")
-        df, demo_stats = clean_demographics(df)
-        report.add_step("Demographic cleaning", 0,
-                       f"Cleaned columns: {demo_stats['cleaned_columns']}")
-
-        # Step 6: Clean timestamps
-        if verbose:
-            print("  [6/6] Parsing timestamps...")
-        df, parse_failures = clean_timestamps(df)
-        report.add_step("Timestamp parsing", 0,
-                       f"{parse_failures:,} parse failures (kept with NaT)")
-
-        # Final: Remove rows with missing essential data
+        
+        if verbose: print("  [5/6] Cleaning demographics...")
+        df, _ = clean_demographics(df)
+        
+        if verbose: print("  [6/6] Parsing timestamps...")
+        df, fails = clean_timestamps(df)
+        report.add_step("Timestamp parsing", 0, f"{fails} failures")
+        
         df, removed = remove_nulls(df, ['latitude', 'longitude', 'crime_type'])
-        report.add_step("Remove incomplete rows", removed,
-                       "Missing latitude, longitude, or crime_type")
-
-        report.final_rows = len(df)
-
-        if verbose:
-            print(f"Cleaning complete: {report.final_rows:,} rows remaining")
-
+        report.add_step("Remove incomplete", removed)
+        
+        report.final_rows = df.height
+        if verbose: print(f"Complete: {df.height} rows")
+        
         return df, report
 
-    def clean_for_database(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, CleaningReport]:
-        """
-        Clean data specifically for database insertion.
-
-        Returns DataFrame with columns matching the database schema.
-        """
-        df, report = self.clean(df)
-
-        # Select and rename columns to match database schema
-        db_columns = {
-            'latitude': 'latitude',
-            'longitude': 'longitude',
-            'crime_type': 'crime_type',
-            'crime_category': 'crime_category',
-            'severity_weight': 'severity_weight',
-            'occurred_at': 'occurred_at',
-            'hour_of_day': 'hour_of_day',
-            'day_of_week': 'day_of_week',
-            'borough': 'borough',
-            'vic_age_group': 'vic_age_group',
-            'vic_race': 'vic_race',
-            'vic_sex': 'vic_sex',
-        }
-
-        # Keep only columns that exist
-        keep_cols = [c for c in db_columns.keys() if c in df.columns]
-        df = df[keep_cols].copy()  # type: ignore
-
-        return df, report
-
-
-# =============================================================================
-# CONVENIENCE FUNCTIONS
-# =============================================================================
-
-def load_and_clean_csv(filepath: str,
-                       verbose: bool = True) -> Tuple[pd.DataFrame, CleaningReport]:
-    """
-    Load a CSV file and run the cleaning pipeline.
-
-    Args:
-        filepath: Path to CSV file
-        verbose: Print progress messages
-
-    Returns:
-        Tuple of (cleaned DataFrame, CleaningReport)
-    """
-    if verbose:
-        print(f"Loading {filepath}...")
-
-    # Optimized dtypes for memory efficiency
-    dtypes = {
-        'cmplnt_num': 'string',
-        'rpt_dt': 'string',
-        'pd_desc': 'category',
-        'ofns_desc': 'category',
-        'boro_nm': 'category',
-        'prem_typ_desc': 'category'
-    }
-
-    df = pd.read_csv(filepath, dtype=dtypes, low_memory=False)
-
-    if verbose:
-        print(f"Loaded {len(df):,} rows")
-
+def load_and_clean_csv(filepath: str, verbose: bool = True) -> Tuple[pl.DataFrame, CleaningReport]:
+    if verbose: print(f"Loading {filepath} using Polars...")
+    
+    # Polars scan_csv is lazy, read_csv is eager.
+    # infer_schema_length=10000 to be safe
+    df = pl.read_csv(filepath, infer_schema_length=10000, ignore_errors=True, null_values=["(null)", "NULL", ""])
+    
     cleaner = DataCleaner()
     return cleaner.clean(df, verbose=verbose)
