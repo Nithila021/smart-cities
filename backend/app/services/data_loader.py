@@ -6,23 +6,12 @@ import os
 from typing import Any, Dict
 
 # Import the data cleaner module
-from data_cleaner import load_and_clean_csv, SEVERITY_WEIGHTS
+from app.services.cleaning import load_and_clean_csv, SEVERITY_WEIGHTS
+from app.core.state import cached_data
 
-# Global cached data
-cached_data: Dict[str, Any] = {
-    'df': None,
-    'crime_clusters': None,
-    'zone_safety_scores': None,
-    'crime_severity': None,
-    'zone_dominant_crimes': None,
-    'amenities_df': None,
-    'dbscan_clusters': None,
-    'victim_demographic_zones': None,
-    'demographic_feature_importance': None,
-    'crime_density_zones': None,
-    'cleaning_report': None  # Store the cleaning report
-}
-
+# =============================================================================
+# DATA LOADING AND TRAINING
+# =============================================================================
 
 def prepare_data() -> pd.DataFrame:
     """Load and preprocess raw NYPD crime data using the data_cleaner module.
@@ -112,8 +101,8 @@ def train_models(df: pd.DataFrame) -> None:
         'zone_dominant_crimes': zone_dominant_crimes
     })
 
-    # Import moved from models.py to avoid circular imports
-    from models import (
+    # Import specialized model initializers
+    from app.services.clustering import (
         initialize_dbscan_clusters,
         initialize_victim_demographic_zones,
         initialize_crime_density_zones,

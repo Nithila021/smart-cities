@@ -1,13 +1,10 @@
-# geo_utils.py
+# app/utils/geo.py
 import re
-# import os
-# import pandas as pd
 from geopy.geocoders import Nominatim
 from math import radians, cos, sin, sqrt, atan2
 from typing import Tuple, Optional, Dict
 
 # City name mappings to standardized codes
-# Add more mappings as you scale to new cities
 CITY_NAME_MAPPINGS = {
     # New York variations
     'new york': 'nyc',
@@ -38,24 +35,13 @@ CITY_NAME_MAPPINGS = {
     # Chicago variations
     'chicago': 'chicago',
     'cook county': 'chicago',
-    # Add more cities as needed
 }
 
 
 def detect_city_from_address(address_components: Dict) -> Optional[str]:
     """
     Extract standardized city code from geocoded address components.
-
-    Args:
-        address_components: Dict from Nominatim's raw address data
-
-    Returns:
-        Standardized city code ('nyc', 'london', etc.) or None if unknown
     """
-    # Nominatim returns address in 'raw' with 'address' dict containing:
-    # city, town, village, municipality, county, state, country, etc.
-
-    # Priority order for city detection
     city_fields = ['city', 'town', 'municipality', 'village', 'county', 'state']
 
     for field in city_fields:
@@ -77,13 +63,6 @@ def detect_city_from_address(address_components: Dict) -> Optional[str]:
 def detect_city_from_coordinates(lat: float, lon: float) -> Optional[str]:
     """
     Detect city from GPS coordinates using reverse geocoding.
-
-    Args:
-        lat: Latitude
-        lon: Longitude
-
-    Returns:
-        Standardized city code or None
     """
     geolocator = Nominatim(user_agent="safety_app", timeout=15)
     try:
@@ -105,16 +84,11 @@ def haversine(lat1, lon1, lat2, lon2):
     a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
+
+
 def get_coordinates_with_city(address: str) -> Optional[Tuple[float, float, str]]:
     """
     Geocode an address and detect the city.
-
-    Args:
-        address: User-provided address string
-
-    Returns:
-        Tuple of (latitude, longitude, city_code) or None if geocoding fails
-        city_code is standardized ('nyc', 'london', etc.) or 'unknown'
     """
     print(f"\n--- Geocoding attempt for: '{address}' ---")
     coord_pattern = r'(-?\d+\.?\d*),\s*(-?\d+\.?\d*)'
@@ -161,19 +135,13 @@ def get_coordinates_with_city(address: str) -> Optional[Tuple[float, float, str]
 def get_coordinates(address: str) -> Optional[Tuple[float, float]]:
     """
     Geocode an address to coordinates (backward compatible).
-
-    For new code, prefer get_coordinates_with_city() which also returns city.
-
-    Args:
-        address: User-provided address string
-
-    Returns:
-        Tuple of (latitude, longitude) or None if geocoding fails
     """
     result = get_coordinates_with_city(address)
     if result:
         return result[0], result[1]  # Just lat, lon
     return None
+
+
 def find_nearby_points(df, lat, lon, distance_km=3):
     """Find points within specified distance using haversine"""
     # First filter with bounding box (faster)

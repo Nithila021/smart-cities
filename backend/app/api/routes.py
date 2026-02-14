@@ -1,30 +1,13 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from geo_utils import get_coordinates
-from data_init import initialize_data, cached_data
-from analysis import analyze_safety, analyze_amenities
-from models import get_crime_density_classification
-from utils import generate_safety_report
-from demographic_parser import parse_demographic_group, generate_custom_safety_recommendations
+from flask import Blueprint, request, jsonify
+from app.core.state import cached_data
+from app.utils.geo import get_coordinates
+from app.services.data_loader import initialize_data
+from app.services.analysis import analyze_safety, analyze_amenities
+from app.services.clustering import get_crime_density_classification
+from app.utils.report import generate_safety_report
+from app.services.demographics import parse_demographic_group, generate_custom_safety_recommendations
 
-app = Flask(__name__)
-
-# Configure CORS
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost",
-            "http://localhost:80",
-            "http://127.0.0.1",
-            "http://127.0.0.1:80",
-            "http://localhost:3000",
-            "http://localhost:5000"
-        ],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
-
+api_bp = Blueprint('api', __name__, url_prefix='/api')
 
 def ensure_data_initialized():
     """Ensure crime data and models are loaded into the global cache."""
@@ -135,7 +118,7 @@ def get_demographic_zones_data():
 # --------------------------
 # API Endpoints
 # --------------------------
-@app.route('/api/analyze_v1', methods=['POST'])
+@api_bp.route('/analyze_v1', methods=['POST'])
 def analyze_endpoint_v1():
     data = request.get_json()
     location = data.get('location', '')
@@ -157,22 +140,22 @@ def analyze_endpoint_v1():
     
     return jsonify({"error": "Invalid location"}), 400
 
-@app.route('/api/heatmap', methods=['GET'])
+@api_bp.route('/heatmap', methods=['GET'])
 def heatmap_endpoint():
     heatmap_data = get_crime_heatmap()
     return jsonify(heatmap_data)
 
-@app.route('/api/density_map', methods=['GET'])
+@api_bp.route('/density_map', methods=['GET'])
 def density_map_endpoint():
     density_data = get_crime_density_map_data()
     return jsonify(density_data)
 
-@app.route('/api/demographic_zones', methods=['GET'])
+@api_bp.route('/demographic_zones', methods=['GET'])
 def demographic_zones_endpoint():
     demographic_data = get_demographic_analysis_data()
     return jsonify(demographic_data)
 
-@app.route('/api/dbscan_clusters', methods=['GET'])
+@api_bp.route('/dbscan_clusters', methods=['GET'])
 def dbscan_clusters_endpoint():
     dbscan_data = cached_data.get('dbscan_clusters')
     if not dbscan_data:
@@ -191,13 +174,14 @@ def dbscan_clusters_endpoint():
     
     return jsonify({'clusters': clusters})
 
-@app.route('/api/analyze_v2', methods=['POST'])
+@api_bp.route('/analyze_v2', methods=['POST'])
 def analyze_endpoint_v2():
     data = request.get_json()
     location = data.get('location', '')
     
     if coords := get_coordinates(location):
         lat, lon = coords
+        # analysis = analyze_safety(lat, lon) # Using imported function which handles data init
         analysis = analyze_safety(lat, lon)
         amenities = analyze_amenities(lat, lon)
         
@@ -215,7 +199,7 @@ def analyze_endpoint_v2():
     
     return jsonify({"error": "Invalid location"}), 400
 
-@app.route('/api/map_data', methods=['GET'])
+@api_bp.route('/map_data', methods=['GET'])
 def map_data_endpoint():
     return jsonify({
         "dbscan_clusters": get_dbscan_clusters_data(),
@@ -224,7 +208,7 @@ def map_data_endpoint():
     })
 
 
-@app.route('/api/chat', methods=['POST'])
+@api_bp.route('/chat', methods=['POST'])
 def chat_endpoint():
     try:
         data = request.get_json()
@@ -302,11 +286,3 @@ def chat_endpoint():
     except Exception as e:  # REQUIRED EXCEPT CLAUSE
         print(f"Server Error: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
-    
-@app.route('/')
-def health_check():
-    return "Safety Analysis Service Running"
-
-if __name__ == '__main__':
-    initialize_data()
-    app.run(host='0.0.0.0', port=5000, debug=True)

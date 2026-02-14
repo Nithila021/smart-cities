@@ -245,4 +245,3 @@ def generate_safety_report(analysis_result, address_str=None, amenity_type=None)
         report.append("• Standard precautions recommended")
 
     return "\n".join(report)
-

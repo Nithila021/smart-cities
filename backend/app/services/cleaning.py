@@ -5,7 +5,7 @@ This module provides reusable, testable cleaning functions for NYPD crime data.
 Each function is pure (no side effects) and can be used independently.
 
 Usage:
-    from data_cleaner import DataCleaner
+    from app.services.cleaning import DataCleaner
     
     cleaner = DataCleaner()
     clean_df, report = cleaner.clean(raw_df)
@@ -631,25 +631,3 @@ def load_and_clean_csv(filepath: str,
 
     cleaner = DataCleaner()
     return cleaner.clean(df, verbose=verbose)
-
-
-# =============================================================================
-# CLI INTERFACE
-# =============================================================================
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python data_cleaner.py <csv_file>")
-        print("Example: python data_cleaner.py NYPD_Complaint_Data_YTD.csv")
-        sys.exit(1)
-
-    filepath = sys.argv[1]
-    clean_df, report = load_and_clean_csv(filepath)
-
-    print("\n" + report.summary())
-
-    # Show sample of cleaned data
-    print("\nSample of cleaned data:")
-

@@ -9,11 +9,10 @@ from math import cos, radians
 # To avoid circular imports
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from data_init import cached_data
-from geo_utils import haversine
-from data_cleaner import CITY_BOUNDS_CONFIG
+from app.core.state import cached_data
+from app.utils.geo import haversine
+from app.services.cleaning import CITY_BOUNDS_CONFIG
 
 # =============================================================================
 # CONSTANTS
@@ -84,7 +83,8 @@ def initialize_dbscan_clusters(df):
         # Renumber clusters to avoid overlap and store profiles
         valid_clusters = [c for c in quadrant_df['temp_cluster'].unique() if c != -1]
         
-        quadrant_df['dbscan_cluster'] = -1  # Initialize all as outliers
+        # Initialize all as outliers first
+        quadrant_df['dbscan_cluster'] = -1
         mask = quadrant_df['temp_cluster'] != -1
         quadrant_df.loc[mask, 'dbscan_cluster'] = quadrant_df.loc[mask, 'temp_cluster'] + cluster_offset
 
@@ -381,6 +381,7 @@ def get_crime_density_classification(lat, lon):
     thresholds = density_data['thresholds']
     if crime_density <= thresholds['low_max']:
         classification = 'Low'
+        
     elif crime_density <= thresholds['medium_max']:
         classification = 'Medium'
     else:

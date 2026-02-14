@@ -1,10 +1,10 @@
-# analysis.py
+# app/services/analysis.py
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
-from data_init import cached_data, initialize_data, load_amenity_data
-from models import predict_dbscan_cluster, predict_demographic_zone, get_crime_density_classification
-from geo_utils import find_nearby_points
+from app.core.state import cached_data
+from app.services.clustering import predict_dbscan_cluster, predict_demographic_zone, get_crime_density_classification
+from app.utils.geo import find_nearby_points
 
 # Try to import database functions (optional - falls back to in-memory if unavailable)
 try:
@@ -99,6 +99,9 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
         use_db: Override for database usage (None = use global setting)
         demographic_group: User demographic for personalized scoring ('general', 'women', 'children', 'elderly')
     """
+    # Import locally to avoid circular dependencies if any
+    from app.services.data_loader import initialize_data
+    
     # Determine whether to use database
     should_use_db = use_db if use_db is not None else (USE_DATABASE and DB_AVAILABLE)
 
@@ -243,6 +246,9 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
 
 def analyze_amenities(lat, lon, radius_km=1):
     """Analyze amenities near a location"""
+    # Import locally to avoid circular dependencies
+    from app.services.data_loader import load_amenity_data
+
     amenities_df = load_amenity_data()
     
     # Find nearby amenities
