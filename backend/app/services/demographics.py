@@ -36,6 +36,17 @@ def parse_demographic_group(description):
         r'(couple|couples)\s*(queer|lgbtq|gay|lesbian)?'
     ]
     
+    # Word to number mapping
+    word_to_num = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        'couple': 2, 'pair': 2, 'single': 1, 'lone': 1, 'an': 1, 'a': 1
+    }
+    
+    # Replace words with numbers for easier parsing
+    for word, num in word_to_num.items():
+        description = re.sub(r'\b' + word + r'\b', str(num), description)
+
     # Count total people
     numbers = re.findall(r'\b(\d+)\b', description)
     if numbers:
@@ -61,7 +72,7 @@ def parse_demographic_group(description):
     profile['races'] = races
     
     # Identify vulnerable groups
-    if any(word in description for word in ['child', 'children', 'kid', 'kids', 'baby', 'infant']):
+    if any(word in description for word in ['child', 'children', 'kid', 'kids', 'baby', 'infant', 'girl', 'boy', 'teen']):
         profile['vulnerable_groups'].append('children')
         profile['risk_factors'].append('child_safety')
     
@@ -69,7 +80,8 @@ def parse_demographic_group(description):
         profile['vulnerable_groups'].append('elderly')
         profile['risk_factors'].append('elderly_vulnerability')
     
-    if any(word in description for word in ['woman', 'women', 'female', 'girl', 'girls']):
+    # Updated: specific check for women/girls
+    if any(word in description for word in ['woman', 'women', 'female', 'girl', 'girls', 'lady', 'ladies']):
         profile['vulnerable_groups'].append('women')
         profile['risk_factors'].append('gender_based_violence')
     
@@ -85,28 +97,46 @@ def parse_demographic_group(description):
         profile['vulnerable_groups'].append('disabled')
         profile['risk_factors'].append('accessibility_safety')
     
-    # Parse specific demographics
+    # Parse specific demographics with loose matching
     # Women count
-    women_match = re.search(r'(\d+)\s*(?:white|black|asian|hispanic|latino|latina)?\s*(?:woman|women)', description)
-    if women_match:
-        count = int(women_match.group(1))
+    # Check if women are mentioned at all
+    if 'women' in profile['vulnerable_groups']:
+        # Try to find specific count
+        women_match = re.search(r'(\d+)\s*(?:white|black|asian|hispanic|latino|latina|old|elderly)?\s*\b(?:woman|women|girl|girls|lady|ladies)\b', description)
+        count = int(women_match.group(1)) if women_match else 1
+        # If total people is known and only women mentioned, might be total
+        if profile['total_people'] > 0 and 'men' not in description and 'boy' not in description:
+             count = max(count, profile['total_people'])
         profile['demographics'].append({'type': 'women', 'count': count})
     
     # Men count
-    men_match = re.search(r'(\d+)\s*(?:white|black|asian|hispanic|latino)?\s*(?:man|men|male)', description)
-    if men_match:
-        count = int(men_match.group(1))
+    # Use regex for word boundary check instead of 'in' substring check
+    if re.search(r'\b(?:man|men|male|boy|boys|guy|guys)\b', description):
+        men_match = re.search(r'(\d+)\s*(?:white|black|asian|hispanic|latino|old|elderly)?\s*\b(?:man|men|male|boy|boys|guy|guys)\b', description)
+        count = int(men_match.group(1)) if men_match else 1
         profile['demographics'].append({'type': 'men', 'count': count})
     
     # Children count
-    children_match = re.search(r'(\d+)\s*(?:child|children|kid|kids)', description)
-    if children_match:
-        count = int(children_match.group(1))
+    if 'children' in profile['vulnerable_groups']:
+        children_match = re.search(r'(\d+)\s*(?:child|children|kid|kids|baby|infant|teen|teenager)\b', description)
+        count = int(children_match.group(1)) if children_match else 1
+        # If we found girls/boys, they are children
+        children_keywords = ['girl', 'girls', 'boy', 'boys']
+        for k in children_keywords:
+            if k in description:
+                # logic overlapping with gender, but ensures 'children' type is added
+                pass 
+        
+        # Ensure 'children' type exists in demographics for analysis.py
+        # Check if already added (maybe as girls/boys?) - analysis.py looks for 'children' type OR 'children' in vulnerable_groups
+        # But specifically for counts, let's add it.
         profile['demographics'].append({'type': 'children', 'count': count})
     
     # Set default if no count found
     if profile['total_people'] == 0:
-        profile['total_people'] = 1
+         # If any demographics found, assume at least 1 or sum of them
+         detected_counts = sum(d['count'] for d in profile['demographics'])
+         profile['total_people'] = max(1, detected_counts)
     
     return profile
 

@@ -70,7 +70,69 @@ def apply_demographic_weighting(base_score: float, crime_counts: dict, demograph
     return round(adjusted_score, 1)
 
 
-def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
+def calculate_demographic_risk(nearby_df: pl.DataFrame, profile: dict) -> float:
+    """
+    Calculate risk penalty based on victim demographics in nearby crimes.
+    Returns a penalty value (0-100) to subtract from safety score.
+    """
+    if nearby_df.height == 0 or not profile:
+        return 0.0
+        
+    penalty = 0.0
+    total_crimes = nearby_df.height
+    
+    # 1. Gender Risk
+    if 'women' in profile.get('demographics', []) or any(d.get('type') == 'women' for d in profile.get('demographics', [])):
+        # Check percentage of female victims
+        if 'vic_sex' in nearby_df.columns:
+            female_victims = nearby_df.filter(pl.col('vic_sex') == 'F').height
+            pct = female_victims / total_crimes
+            # If > 30% of victims are female, apply penalty (baseline is usually lower for violent crime)
+            if pct > 0.30:
+                penalty += (pct - 0.30) * 50 # Max ~35 pts if 100% female victims
+    
+    # 2. Age Risk (Children/Elderly)
+    if 'children' in profile.get('vulnerable_groups', []) or any(d.get('type') == 'children' for d in profile.get('demographics', [])):
+        if 'vic_age_group' in nearby_df.columns:
+            child_victims = nearby_df.filter(pl.col('vic_age_group') == '<18').height
+            pct = child_victims / total_crimes
+            if pct > 0.05: # Children are rarely victims, so low threshold
+                penalty += (pct - 0.05) * 200 # High penalty for child crimes
+                
+    if 'elderly' in profile.get('vulnerable_groups', []):
+        if 'vic_age_group' in nearby_df.columns:
+            elderly_victims = nearby_df.filter(pl.col('vic_age_group') == '65+').height
+            pct = elderly_victims / total_crimes
+            if pct > 0.05:
+                penalty += (pct - 0.05) * 100
+
+    # 3. Race Risk (Bias crimes or disproportionate targeting)
+    # This is sensitive. We assume if a user provides their race, they want to know if people of that race are targets.
+    user_races = profile.get('races', [])
+    if user_races and 'vic_race' in nearby_df.columns:
+        for race in user_races:
+            # Map user race string to NYPD categories roughly
+            nypd_race = None
+            if race.lower() == 'black': nypd_race = 'BLACK'
+            elif race.lower() == 'white': nypd_race = 'WHITE'
+            elif race.lower() == 'asian': nypd_race = 'ASIAN / PACIFIC ISLANDER'
+            elif 'hispanic' in race.lower(): nypd_race = 'HISPANIC' # Catch both white/black hispanic
+            
+            if nypd_race:
+                # Count victims of this race
+                if nypd_race == 'HISPANIC':
+                    race_victims = nearby_df.filter(pl.col('vic_race').str.contains("HISPANIC")).height
+                else:
+                    race_victims = nearby_df.filter(pl.col('vic_race') == nypd_race).height
+                
+                pct = race_victims / total_crimes
+                # If concentration is high (simple heuristic > 40%), add small awareness penalty
+                if pct > 0.40:
+                    penalty += 5.0
+
+    return min(40.0, penalty) # Cap max demographic penalty
+
+def analyze_safety(lat, lon, use_db=None, demographic_profile=None):
     """Perform safety analysis for given coordinates using Polars."""
     # Import locally to avoid circular dependencies if any
     from app.services.data_loader import initialize_data
@@ -194,16 +256,33 @@ def analyze_safety(lat, lon, use_db=None, demographic_group='general'):
         vc = nearby['crime_category'].value_counts()
         crime_categories = {row['crime_category']: row['count'] for row in vc.iter_rows(named=True)}
 
-    # Apply demographic-specific weighting to safety score
+    # Apply demographic-specific weighting to safety score (Old Logic - Type based)
+    # We keep this as it handles "crime types" (e.g. rape affects women score more)
+    # But we add the new victim-based penalty
+    
+    # Extract simple group string for old logic
+    simple_group = 'general'
+    if demographic_profile:
+        if 'children' in demographic_profile.get('vulnerable_groups', []): simple_group = 'children'
+        elif 'women' in demographic_profile.get('vulnerable_groups', []) or any(d.get('type') == 'women' for d in demographic_profile.get('demographics', [])): simple_group = 'women'
+        elif 'elderly' in demographic_profile.get('vulnerable_groups', []): simple_group = 'elderly'
+
     adjusted_safety_score = apply_demographic_weighting(
-        safety_score, crime_categories, demographic_group
+        safety_score, crime_categories, simple_group
     )
+    
+    # NEW: Apply Victim-Based Penalty
+    victim_penalty = 0.0
+    if demographic_profile and nearby.height > 0:
+        victim_penalty = calculate_demographic_risk(nearby, demographic_profile)
+        adjusted_safety_score = max(0, adjusted_safety_score - victim_penalty)
 
     # Prepare final analysis
     analysis = {
         'safety_score': round(adjusted_safety_score, 1),
         'base_safety_score': round(safety_score, 1),  # Unadjusted score for reference
-        'demographic_group': demographic_group,
+        'victim_penalty': round(victim_penalty, 1),
+        'demographic_profile': demographic_profile,
         'zone': int(zone),
         'dominant_crime': dominant_crime_info['dominant_crime'],
         'common_crimes': dominant_crime_info['common_crimes'],

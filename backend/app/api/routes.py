@@ -19,6 +19,7 @@ class AnalyzeRequest(BaseModel):
     location: str
     include_advanced: bool = False
     include_amenities: bool = False
+    demographic_profile: Optional[Dict] = None
 
 class ChatRequest(BaseModel):
     message: str
@@ -139,10 +140,12 @@ def get_demographic_zones_data():
 def analyze_endpoint_v1(request: AnalyzeRequest):
     location = request.location
     include_advanced = request.include_advanced
+    # Use provided profile or parse from string if needed (future)
+    demographic_profile = request.demographic_profile
     
     if coords := get_coordinates(location):
         lat, lon = coords
-        analysis = analyze_safety(lat, lon)
+        analysis = analyze_safety(lat, lon, demographic_profile=demographic_profile)
         
         if request.include_amenities:
             analysis['amenities'] = analyze_amenities(lat, lon)
@@ -190,10 +193,11 @@ def dbscan_clusters_endpoint():
 @router.post('/analyze_v2')
 def analyze_endpoint_v2(request: AnalyzeRequest):
     location = request.location
+    demographic_profile = request.demographic_profile
     
     if coords := get_coordinates(location):
         lat, lon = coords
-        analysis = analyze_safety(lat, lon)
+        analysis = analyze_safety(lat, lon, demographic_profile=demographic_profile)
         amenities = analyze_amenities(lat, lon)
         
         response_data = {
