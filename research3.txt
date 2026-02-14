@@ -13,16 +13,16 @@ of how much of it is already reflected in the current repo.
 - DATA LAYER
   ✅ Implemented: CSV-based NYPD cleaner (`backend/data_cleaner.py`) with:
      - Auto-detection of geographic bounds (multi-city support)
-     - Crime type standardization and severity weights
+     - Crime type standardization and severity weights (same crime has same weight across all files in safety score calcs now)
      - Crime category mapping for demographic weighting
      - Demographic data cleaning (age, race, sex)
      - Timestamp parsing with derived time features
   ✅ Implemented: In-memory cache (`backend/data_init.py`) with K-Means zones
-  ✅ Implemented: PostgreSQL + PostGIS instance with NYPD crime data migrated
+  ❌ Implemented: PostgreSQL + PostGIS instance with NYPD crime data migrated
      (manual setup; dual-mode code exists but `USE_DATABASE = False`)
   ❌ Planned: Move schema into code (`schema.sql`, `migrate_data.py`,
      `db_config.py`) and wire Flask to read from Postgres instead of CSV
-  ❌ Planned: Real amenities via Overpass API, 311 complaints, lighting, transit
+  ❌ Planned: Real amenities via Overpass API, 311 complaints, lighting, transit (later)
 
 - ML LAYER
   ✅ Implemented: K-Means (30 clusters) / DBSCAN (quadrant-based) / KDE density
