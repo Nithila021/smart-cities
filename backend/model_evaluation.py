@@ -4,7 +4,7 @@ Tests the accuracy and performance of ML models used in the safety analysis syst
 """
 
 import numpy as np
-import pandas as pd
+# import pandas as pd
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix

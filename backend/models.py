@@ -4,7 +4,7 @@ from sklearn.cluster import DBSCAN, KMeans
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.neighbors import KernelDensity
 from math import cos, radians
-import warnings
+# import warnings
 
 # To avoid circular imports
 import sys
